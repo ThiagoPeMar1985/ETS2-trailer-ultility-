@@ -33,6 +33,8 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE TS_EXTRA_UTILITIES_DLL_
 target_compile_features(${CMAKE_PROJECT_NAME} PUBLIC cxx_std_17)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# vendor/minhook still declares cmake_minimum_required < 3.5, which CMake 4 rejects
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 add_subdirectory(vendor)
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src vendor/scs_sdk/include vendor/imgui vendor/minhook/include)
