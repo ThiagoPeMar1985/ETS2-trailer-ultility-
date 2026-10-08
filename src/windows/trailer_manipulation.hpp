@@ -15,6 +15,8 @@ namespace ts_extra_utilities
         bool valid_ = false;
 
         void render_trailer_steering( uint32_t i ) const;
+        void render_trailer_suspension( uint32_t i );
+        void render_memory_debug();
 
     public:
         CTrailerManipulation();

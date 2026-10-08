@@ -18,6 +18,9 @@ namespace ts_extra_utilities::settings
             0, // STEER_RIGHT
             0, // STEER_CENTER
             0, // TOGGLE_STEERING_LOCK
+            0, // SUSP_UP
+            0, // SUSP_DOWN
+            0, // SUSP_NEXT_TRAILER
         };
 
         // ini keys, kept stable so saved files keep working if display names change
@@ -28,6 +31,9 @@ namespace ts_extra_utilities::settings
             L"steer_right",
             L"steer_center",
             L"toggle_steering_lock",
+            L"susp_up",
+            L"susp_down",
+            L"susp_next_trailer",
         };
 
         constexpr const char* names[ action_count ] = {
@@ -37,6 +43,9 @@ namespace ts_extra_utilities::settings
             "Steer right",
             "Center steering",
             "Lock / unlock steering",
+            "Suspension up (selected)",
+            "Suspension down (selected)",
+            "Select next trailer",
         };
 
         int capturing = -1;
