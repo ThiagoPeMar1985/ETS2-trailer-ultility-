@@ -21,6 +21,7 @@ namespace ts_extra_utilities
             for ( int i = 0; i < settings::action_count; ++i )
             {
                 const auto action = static_cast< settings::Action >( i );
+                const bool fixed = action == settings::Action::TOGGLE_UI || action == settings::Action::TOGGLE_CURSOR;
                 ImGui::PushID( i );
                 ImGui::TableNextRow();
 
@@ -29,22 +30,34 @@ namespace ts_extra_utilities
                 ImGui::TextUnformatted( settings::action_name( action ) );
 
                 ImGui::TableNextColumn();
-                const auto label = settings::is_capturing( action )
-                                       ? std::string( "Press a key... (Esc cancels)" )
-                                       : settings::key_name( settings::key( action ) );
-                if ( ImGui::Button( fmt::format( "{}##bind", label ).c_str(), ImVec2( -FLT_MIN, 0 ) ) )
+                if ( fixed )
                 {
-                    settings::begin_capture( action );
+                    // these two are always Delete/Insert so the plugin can never
+                    // become unreachable
+                    ImGui::TextDisabled( "%s (fixed)", settings::key_name( settings::key( action ) ).c_str() );
+                }
+                else
+                {
+                    const auto label = settings::is_capturing( action )
+                                           ? std::string( "Press a key... (Esc cancels)" )
+                                           : settings::key_name( settings::key( action ) );
+                    if ( ImGui::Button( fmt::format( "{}##bind", label ).c_str(), ImVec2( -FLT_MIN, 0 ) ) )
+                    {
+                        settings::begin_capture( action );
+                    }
                 }
 
                 ImGui::TableNextColumn();
-                ImGui::BeginDisabled( settings::key( action ) == 0 );
-                if ( ImGui::SmallButton( "Clear" ) )
+                if ( !fixed )
                 {
-                    settings::g_settings.keys[ i ] = 0;
-                    settings::save();
+                    ImGui::BeginDisabled( settings::key( action ) == 0 );
+                    if ( ImGui::SmallButton( "Clear" ) )
+                    {
+                        settings::g_settings.keys[ i ] = 0;
+                        settings::save();
+                    }
+                    ImGui::EndDisabled();
                 }
-                ImGui::EndDisabled();
 
                 ImGui::PopID();
             }

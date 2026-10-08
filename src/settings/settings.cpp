@@ -18,8 +18,6 @@ namespace ts_extra_utilities::settings
             0, // STEER_RIGHT
             0, // STEER_CENTER
             0, // TOGGLE_STEERING_LOCK
-            0, // SUSP_UP
-            0, // SUSP_DOWN
             0, // SUSP_NEXT_TRAILER
         };
 
@@ -31,8 +29,6 @@ namespace ts_extra_utilities::settings
             L"steer_right",
             L"steer_center",
             L"toggle_steering_lock",
-            L"susp_up",
-            L"susp_down",
             L"susp_next_trailer",
         };
 
@@ -43,9 +39,7 @@ namespace ts_extra_utilities::settings
             "Steer right",
             "Center steering",
             "Lock / unlock steering",
-            "Suspension up (selected)",
-            "Suspension down (selected)",
-            "Select next trailer",
+            "Select trailer for suspension",
         };
 
         int capturing = -1;
@@ -77,6 +71,11 @@ namespace ts_extra_utilities::settings
         {
             g_settings.keys[ i ] = GetPrivateProfileIntW( L"keybinds", ini_keys[ i ], static_cast< INT >( default_keys[ i ] ), path.c_str() );
         }
+
+        // ui and cursor keys are fixed; a stale ini or a rebinding collision must not
+        // leave the plugin unreachable
+        g_settings.keys[ static_cast< int >( Action::TOGGLE_UI ) ] = VK_DELETE;
+        g_settings.keys[ static_cast< int >( Action::TOGGLE_CURSOR ) ] = VK_INSERT;
 
         wchar_t speed[ 32 ] = {};
         GetPrivateProfileStringW( L"steering", L"speed", L"", speed, 32, path.c_str() );
@@ -158,6 +157,13 @@ namespace ts_extra_utilities::settings
 
         // modifiers alone are not useful bindings; wait for a real key
         if ( vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU ) return true;
+
+        // Delete/Insert are reserved for opening the window and releasing the cursor
+        if ( vk == VK_DELETE || vk == VK_INSERT )
+        {
+            capturing = -1;
+            return true;
+        }
 
         if ( vk != VK_ESCAPE )
         {

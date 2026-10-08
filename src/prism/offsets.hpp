@@ -17,11 +17,6 @@ namespace ts_extra_utilities::prism::offsets
     constexpr uint32_t trailer_steering = 0x0690; // float, -1..1, written by the game every advance
     constexpr uint32_t trailer_steering_data = 0x0698; // vehicle_wheel_steering_data_t*, null when not steerable
 
-    // air suspension height for the trailer, 0..1-ish float.
-    // PENDING: to be confirmed with the in-game memory diff (Memory research window).
-    constexpr uint32_t trailer_suspension = 0xFFFFFFFF;
-    constexpr uint32_t invalid = 0xFFFFFFFF;
-
     template < typename T >
     T& field( void* object, const uint32_t offset )
     {
