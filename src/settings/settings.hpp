@@ -12,7 +12,6 @@ namespace ts_extra_utilities::settings
         STEER_RIGHT,
         STEER_CENTER,
         TOGGLE_STEERING_LOCK,
-        SUSP_NEXT_TRAILER,
         COUNT,
     };
 

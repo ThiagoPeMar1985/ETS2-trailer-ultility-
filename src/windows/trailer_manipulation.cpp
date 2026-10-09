@@ -30,14 +30,6 @@ namespace ts_extra_utilities
     float angle_ui[ max_trailers ] = {};
     bool centering_ui[ max_trailers ] = {}; // easing back to 0 at steering_speed
 
-    // Trailer that receives the game's native suspension controls. While a trailer
-    // other than 0 is selected, game_actor->first_trailer points at it, so the
-    // game's own susp up/down keys act on the selected trailer.
-    uint32_t susp_selected = 0;
-    void* swap_actor = nullptr;      // game_actor whose trailer slot we patched
-    void* swap_written = nullptr;    // the trailer pointer we placed in the slot
-    void* swap_real_first = nullptr; // genuine first trailer while the swap is active
-
     std::shared_ptr< CFunctionHook > set_individual_steering_hook = nullptr;
 
     /**
@@ -75,13 +67,6 @@ namespace ts_extra_utilities
     {
         release_all();
         set_individual_steering_hook.reset();
-
-        // leave the game's trailer slot as we found it
-        if ( swap_actor != nullptr )
-        {
-            prism::offsets::field< void* >( swap_actor, prism::offsets::game_actor_trailer ) = swap_real_first;
-            swap_actor = nullptr;
-        }
     }
 
     bool CTrailerManipulation::init()
@@ -159,27 +144,10 @@ namespace ts_extra_utilities
 
         auto* game_actor = CCore::g_instance->get_game_actor();
 
-        // If we patched game_actor->first_trailer, recover the genuine first trailer
-        // for enumeration; a slot holding something else means the game rewrote it
-        // (attach/detach), which becomes the new real first.
         void* trailer = nullptr;
         if ( game_actor != nullptr )
         {
             trailer = prism::offsets::field< void* >( game_actor, prism::offsets::game_actor_trailer );
-            if ( swap_actor == game_actor )
-            {
-                // slot still holds our trailer -> real first unchanged; anything else
-                // is a fresh write by the game (attach/detach) and becomes the real first
-                if ( trailer != swap_written ) swap_real_first = trailer;
-                trailer = swap_real_first;
-            }
-            else
-            {
-                // actor changed since the swap (new vehicle/session); nothing to restore
-                swap_actor = nullptr;
-                swap_written = nullptr;
-                swap_real_first = nullptr;
-            }
         }
 
         trailer_count = 0;
@@ -202,12 +170,11 @@ namespace ts_extra_utilities
         // hotkeys, ignored while the game is in the background or a key is being rebound
         if ( game_has_focus() && !settings::is_capturing() )
         {
-            bool lock_pressed = false, center_pressed = false, susp_next = false;
+            bool lock_pressed = false, center_pressed = false;
             key_down( settings::Action::TOGGLE_STEERING_LOCK, &lock_pressed );
             key_down( settings::Action::STEER_CENTER, &center_pressed );
             const bool left = key_down( settings::Action::STEER_LEFT );
             const bool right = key_down( settings::Action::STEER_RIGHT );
-            key_down( settings::Action::SUSP_NEXT_TRAILER, &susp_next );
 
             bool any_locked = false;
             for ( uint32_t i = 0; i < trailer_count; ++i ) any_locked |= locked_ui[ i ];
@@ -245,9 +212,6 @@ namespace ts_extra_utilities
                 if ( right ) angle_ui[ i ] = ( std::min )( angle_ui[ i ] + step, 1.f );
                 locked_steering[ i ].angle.store( angle_ui[ i ] );
             }
-
-            // cycle which trailer receives the game's native suspension control
-            if ( susp_next && trailer_count > 0 ) susp_selected = ( susp_selected + 1 ) % trailer_count;
         }
 
         // Published every frame: the data pointer changes when trailers are swapped.
@@ -258,58 +222,6 @@ namespace ts_extra_utilities
             {
                 angle_ui[ i ] = prism::offsets::field< float >( trailers[ i ], prism::offsets::trailer_steering );
             }
-        }
-
-        // ---- trailer suspension: point the game's "first trailer" slot at the
-        // selected trailer so the native susp keys act on it ----
-        if ( susp_selected >= trailer_count ) susp_selected = 0;
-        if ( game_actor != nullptr )
-        {
-            void* desired = susp_selected == 0 ? nullptr : trailers[ susp_selected ];
-            if ( desired != nullptr )
-            {
-                if ( swap_actor != game_actor )
-                {
-                    swap_actor = game_actor;
-                    swap_real_first = trailers[ 0 ];
-                    CCore::g_instance->info( "Routing trailer suspension controls to trailer {}", susp_selected );
-                }
-                prism::offsets::field< void* >( game_actor, prism::offsets::game_actor_trailer ) = desired;
-                swap_written = desired;
-            }
-            else if ( swap_actor == game_actor )
-            {
-                prism::offsets::field< void* >( game_actor, prism::offsets::game_actor_trailer ) = swap_real_first;
-                swap_actor = nullptr;
-                swap_written = nullptr;
-                swap_real_first = nullptr;
-                CCore::g_instance->info( "Trailer suspension controls back to trailer 0" );
-            }
-        }
-    }
-
-    void CTrailerManipulation::render_trailer_suspension( const uint32_t i )
-    {
-        if ( i == 0 )
-        {
-            ImGui::TextDisabled( "Game susp keys control this trailer natively" );
-            ImGui::SameLine();
-            if ( susp_selected != 0 )
-            {
-                ImGui::TextColored( ImVec4( 1.f, .6f, .1f, 1.f ), "(routed to %u)", susp_selected );
-            }
-            return;
-        }
-
-        bool sel = susp_selected == i;
-        if ( ImGui::Checkbox( "Route game susp keys here", &sel ) )
-        {
-            susp_selected = sel ? i : 0;
-        }
-        if ( susp_selected == i )
-        {
-            ImGui::SameLine();
-            ImGui::TextColored( ImVec4( .3f, 1.f, .3f, 1.f ), "active" );
         }
     }
 
@@ -375,9 +287,6 @@ namespace ts_extra_utilities
                 ImGui::PushID( trailer_name.c_str() );
                 if ( ImGui::CollapsingHeader( trailer_name.c_str(), ImGuiTreeNodeFlags_DefaultOpen ) )
                 {
-                    ImGui::SeparatorText( "Suspension" );
-                    this->render_trailer_suspension( i );
-
                     if ( steering_data( trailers[ i ] ) != nullptr )
                     {
                         ImGui::SeparatorText( "Steering" );
