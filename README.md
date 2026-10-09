@@ -47,9 +47,9 @@ to bind the steering actions to the keys you want.
 
 If this plugin helped you, you can support the work with a small donation — even $1 makes a difference and keeps the updates coming:
 
-[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-%E2%98%95-orange?style=for-the-badge)](https://wise.com/pay/r/nryR7I28VzxZeqI)
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-%E2%98%95-orange?style=for-the-badge)](https://wise.com/pay/r/EKyJzvBu89ivs4Q)
 
-👉 **[Click here to donate via Wise](https://wise.com/pay/r/nryR7I28VzxZeqI)**
+👉 **[Click here to donate via Wise](https://wise.com/pay/r/EKyJzvBu89ivs4Q)**
 
 ## Credits
 
