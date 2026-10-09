@@ -1,40 +1,49 @@
-# ts-extra-utilities
+# ts-extra-utilities (ETS2 1.61 fork)
 
 > [!WARNING]
-> This is more of a PoC(Proof of Concept) and very much WIP(Work In Progress), it is not extensively tested or in any way a stable finished product.
-> If you decide to use this, expect possible issues / crashes (especially after game updates)
+> This is a Proof of Concept / Work In Progress. It is not extensively tested and may crash,
+> especially after game updates. Singleplayer only — **NOT** recommended for multiplayer.
 
-A plugin for ATS/ETS2 to add some experimental extra functionality.
+An updated fork of [dariowouters/ts-extra-utilities](https://github.com/dariowouters/ts-extra-utilities),
+a plugin for ATS/ETS2 that adds experimental extra functionality.
+
+This branch ports the trailer steering feature to **Euro Truck Simulator 2 / ATS 1.61** and adds
+configurable keybinds so the steerable trailer axles can be controlled while driving, without
+opening the plugin window.
 
 ## Current features
 
- - Manually steerable trailer wheels
-    - Abilty to take control of the steerable wheels on a trailer
+- **Manually steerable trailer wheels** (1.61 port)
+   - Take control of the steerable wheels on each attached trailer individually
+   - Detects all trailers in the chain (trailer 0, 1, 2, ...) and shows them in the UI
+   - Works through `set_individual_steering`, so the game's own physics keeps running
 
-   [Preview video](https://youtu.be/0kRavShaXy0)
+- **Configurable keybinds**
+   - Steer left / steer right / center steering / lock-unlock steering
+   - Bind any key, including the numpad — press the action in the Keybinds window, then press the key
+   - Once bound, everything works while driving: steer, smoothly return to center at the configured
+     speed, and lock the axles straight — no need to open the plugin again
+   - Bindings are saved to `%APPDATA%\ts-extra-utilities\settings.ini`
 
- - Individually detachable trailers
-    - Ability to disconnect and connect trailers individually and out of order
-    - Still has multiple issues when trailers are disconnected, trailer cables, 3rd person camera, ...
+- **UI controls**
+   - `Delete` opens/closes the plugin window (fixed)
+   - `Insert` frees the mouse cursor to click the UI (fixed)
+   - Per-trailer: lock checkbox, angle slider, left / center / right buttons
 
-   [Preview video](https://youtu.be/Nu6YvKKSL2g)
-
- - Lockable trailer joints (PhysX only, `-physx` as a game launch parameter in Steam)
-    - Ability to lock the joints between vehicle and trailers so you can stop them from pivoting
-
-   [Preview video](https://youtu.be/zXtlzMVNEXM)
+Original 1.53 features (detachable trailers, PhysX joint locks) are **disabled** in this fork —
+their offsets have not been re-verified for 1.61.
 
 ## How to use
 
-Currently only works with DirectX11.
+Currently only works with **DirectX 11**.
 
-Made for singleplayer, **NOT** recommended in multiplayer.
+Copy `ts-extra-utilities.dll` to `<game_install_location>/bin/win_x64/plugins`
+(create the `plugins` folder if it does not exist).
 
+In game: press `Delete` to open the window, `Insert` to enable the mouse cursor. Open **Keybinds**
+to bind the steering actions to the keys you want.
 
-Download the [latest release](https://github.com/dariowouters/ts-extra-utilities/releases/latest), copy the `ts-extra-utilities.dll` to `<game_install_location>/bin/win_x64/plugins`  
-(if the plugins folder does not exists, you can create one)
+## Credits
 
-Then in-game you can toggle the UI with `delete` and `insert` to toggle the cursor.  
-All keys can be changed in the Keybinds window (click an action, press a key; Esc cancels). Steering
-hotkeys (steer left / right, center, lock / unlock) are unbound by default. Settings are saved to
-`%APPDATA%\ts-extra-utilities\settings.ini`.
+- Original plugin: [dariowouters](https://github.com/dariowouters)
+- 1.61 port and keybind system: this fork
