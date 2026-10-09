@@ -15,7 +15,7 @@ opening the plugin window.
 
 - **Manually steerable trailer wheels** (1.61 port)
    - Take control of the steerable wheels on each attached trailer individually
-   - Detects all trailers in the chain (trailer 0, 1, 2, ...) and shows them in the UI
+   - Detects all trailers and shows them in the UI
    - Works through `set_individual_steering`, so the game's own physics keeps running
 
 - **Configurable keybinds**
