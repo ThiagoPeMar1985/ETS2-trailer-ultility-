@@ -1,3 +1,8 @@
+1.2.2
+    - Trailer steering offsets updated for game version 1.61.1.9 (the trailer object grew by
+      0x28 bytes: steering angle 0x690 -> 0x6B8, steering data 0x698 -> 0x6C0, slave trailer
+      0x1060 -> 0x1088; first trailer in game_actor is still 0xC8)
+
 1.2.0
     - Configurable keybinds (Keybinds window), saved to %APPDATA%\ts-extra-utilities\settings.ini
     - New hotkeys: steer left / right, center, lock / unlock trailer steering (unbound by default)
