@@ -1,69 +1,27 @@
-1.3.7
-    - A trailer connected straight to the truck now marks the truck's coupling
-      state (truck physics +0x14E0) as fully coupled: without it the per-frame
-      trailer loop kept spring-braking the jointed trailer and the truck never
-      broadcast its brake state down the chain
-    - The parked set keeps re-applying its spring brake through the shared
-      trailer chain even to a trailer sitting on the fifth wheel; the brake
-      setter is now hooked and positive writes aimed at a truck-towed trailer
-      are swallowed, so its wheels stay free while the pedal brake still works
-    - g_trailer_cables_mode follows the convoy automatically: 1 while the first
-      trailer is coupled, 2 once the last trailer is coupled, 0 with nothing
-    - Overlay font slightly enlarged for 4K readability
+2.0
+    - Individually detachable trailers, ported to 1.61.1.9: per-trailer
+      Connect/Disconnect buttons and keybinds for trailers 1-3. Disconnect drops the
+      landing gear and the joint; Connect re-attaches the trailer to whatever is
+      ahead of it in the chain. Singleplayer only
+    - "Attach trailer to truck": connect a rear trailer straight to the fifth wheel
+      — park a trailer at a dock, haul the rest, come back and pick it up. Refused
+      while the fifth wheel is occupied
+    - Manual connect/disconnect replays the full native sequence: towed-trailer
+      bookkeeping, parked flag, brace, air line rebuild and wheel-load
+      distribution; the truck's coupling state (+0x14E0) is marked coupled so the
+      game releases the trailer's brakes
+    - The parked set can no longer re-brake a trailer sitting on the truck: the
+      brake setter is hooked and positive writes aimed at a truck-towed trailer
+      are swallowed, while the pedal brake still works
+    - connect_slave stays permanently hooked but only refuses trailers detached
+      through this plugin — the game no longer rejoins them when the head trailer
+      is detached with T, and normal attach/spawn keeps working
+    - g_trailer_cables_mode follows the coupled convoy automatically: 1 while the
+      first trailer is coupled, 2 once the last trailer is coupled, 0 with nothing
+    - Overlay font slightly enlarged for 4K readability; Insert releases a
+      centered cursor
     - Diagnostic dump per trailer (joint, brake channels, connector, truck towed
-      pointer) plus brake setter call tracing in game.log.txt
-
-1.3.6
-    - Manual connect now releases the trailer brake channel directly: the game's
-      per-frame update writes trailer+0x760 = 1.0 while the joint is missing and
-      nothing zeroed it on our attach, leaving the wheels locked. Connect clears
-      +0x760 and the force-brake byte +0x764; disconnect writes the same state the
-      game applies to a jointless trailer (+0x760 = 1.0, +0x730 = 0)
-
-1.3.5
-    - connect_slave is now permanently hooked but conditional: it only refuses to
-      auto-attach a slave trailer when that trailer was detached through this
-      plugin. Native flows (spawn, T-key attach) keep working, and the game no
-      longer rejoins plugin-detached trailers when the head trailer is detached
-      with T
-    - A trailer connected straight to the truck keeps its detach mark, so its
-      chain parent cannot pull it back through connect_slave
-    - Connecting to the chain parent clears the mark and returns the trailer to
-      native management; stale marks are cleaned up every frame
-
-1.3.4
-    - Reverted the overlay font to the stock size
-    - Fixed a crash: the truck-side bookkeeping helpers (towed pointer, wheel load)
-      were also running with a trailer as the parent, where those offsets hold
-      different fields — they now run for truck parents only
-
-1.3.3
-    - Manual connect now replays the full native attach sequence: towed-trailer
-      bookkeeping on the parent, detached-state flag, parked flag, air/electric
-      line rebuild and wheel-load distribution — a manually connected trailer no
-      longer keeps its spring brakes applied
-    - Manual disconnect mirrors the native detach: parked flag set, parent's
-      bookkeeping/wheel load cleared, lines rebuilt
-
-1.3.2
-    - Connect now clears the trailer's "parked" flag (+0x1198) like the native attach
-      does; a manually connected trailer no longer drags with its wheels locked
-    - Overlay font rendered at 2x with matching spacing for 4K readability
-    - The cursor now appears centered on screen when released with Insert
-
-1.3.1
-    - New keybinds: Attach / detach trailer 1-3 (one key toggles against the chain parent)
-      and Attach trailer 2/3 to truck (connects that trailer straight to the fifth wheel)
-    - "Connect to truck" button per detached trailer behind the first; refused while the
-      fifth wheel is occupied so two trailers can never share one joint point
-
-1.3.0
-    - Individually detachable trailers are back, ported to 1.61.1.9: per-trailer
-      Connect/Disconnect buttons in the Trailer Manipulation window. Disconnect drops the
-      landing gear and the joint; Connect re-attaches the trailer to whatever is ahead of
-      it in the chain (truck for the first trailer). Back the truck close to the parked
-      trailer before reconnecting. The null-joint guard is only bypassed while a trailer
-      is actually detached, so normal play keeps the native checks. Singleplayer only.
+      pointer) and brake setter call tracing in game.log.txt
 
 1.2.2
     - Trailer steering offsets updated for game version 1.61.1.9 (the trailer object grew by

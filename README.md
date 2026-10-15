@@ -27,11 +27,31 @@ opening the plugin window.
 
 - **UI controls**
    - `Delete` opens/closes the plugin window (fixed)
-   - `Insert` frees the mouse cursor to click the UI (fixed)
+   - `Insert` frees the mouse cursor (centered on screen) to click the UI (fixed)
    - Per-trailer: lock checkbox, angle slider, left / center / right buttons
 
-Original 1.53 features (detachable trailers, PhysX joint locks) are **disabled** in this fork —
-their offsets have not been re-verified for 1.61.
+- **Individually detachable trailers** (multi-trailer / rodotren support)
+   - Detach and re-attach each trailer on its own — detach the last trailer at a
+     dock, haul the rest, come back and pick it up
+   - Per-trailer Connect/Disconnect buttons plus configurable keybinds:
+     attach/detach trailer 1, 2 and 3 against its chain parent
+   - **Attach trailer to truck**: connect a rear trailer straight to the fifth
+     wheel while the rest of the set stays parked
+   - Reconnected trailers release their brakes and roll normally — the plugin
+     replays the game's full attach sequence (towed bookkeeping, parked flag,
+     brace, air line rebuild, wheel load, coupling state)
+   - Plugin-detached trailers are never auto-rejoined by the game's own
+     attach/detach flow; the native `T` key keeps working for the first trailer
+   - `g_trailer_cables_mode` follows the coupled convoy automatically: `1` while
+     the first trailer is coupled, `2` once the last trailer is coupled, `0` with
+     nothing attached
+   - Per-trailer diagnostics (joint, brake channels, connector, towed pointer)
+     dumped to `game.log.txt`
+
+> [!NOTE]
+> Trailer attach/detach is singleplayer only and assumes the truck is already
+> positioned under the trailer's coupling point — the joint is created at the
+> fixed hook, so align first.
 
 ## How to use
 
