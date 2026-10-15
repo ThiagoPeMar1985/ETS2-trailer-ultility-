@@ -41,6 +41,18 @@ namespace ts_extra_utilities
      */
     void hk_set_individual_steering( prism::vehicle_wheel_steering_data_t* data, float angle )
     {
+        // diagnostic: log each distinct steering-data pointer once, so the game log shows
+        // which objects the game steers and whether a trailer ever shows up here
+        static void* seen_data[ 16 ] = {};
+        static uint32_t seen_count = 0;
+        bool known = false;
+        for ( uint32_t i = 0; i < seen_count; ++i ) known |= seen_data[ i ] == data;
+        if ( !known && seen_count < 16 )
+        {
+            seen_data[ seen_count++ ] = data;
+            CCore::g_instance->info( "set_individual_steering sees data={:p} angle={:.3f}", static_cast< void* >( data ), angle );
+        }
+
         for ( auto& locked : locked_steering )
         {
             if ( data != nullptr && locked.data.load( std::memory_order_relaxed ) == data )
@@ -157,6 +169,32 @@ namespace ts_extra_utilities
             trailer = prism::offsets::field< void* >( trailer, prism::offsets::trailer_slave );
         }
 
+        // diagnostic: log trailer chain / steering-data transitions instead of spamming every frame
+        static uint32_t logged_trailer_count = UINT32_MAX;
+        static void* logged_data[ max_trailers ] = {};
+        static bool logged_locked[ max_trailers ] = {};
+        if ( trailer_count != logged_trailer_count )
+        {
+            logged_trailer_count = trailer_count;
+            CCore::g_instance->info( "trailer_count = {}", trailer_count );
+        }
+        for ( uint32_t i = 0; i < trailer_count; ++i )
+        {
+            auto* sd = steering_data( trailers[ i ] );
+            if ( sd != logged_data[ i ] )
+            {
+                logged_data[ i ] = sd;
+                CCore::g_instance->info( "trailer {} @ {:p}: steering_data={:p} steering={:.3f}",
+                    i, trailers[ i ], static_cast< void* >( sd ),
+                    prism::offsets::field< float >( trailers[ i ], prism::offsets::trailer_steering ) );
+            }
+            if ( locked_ui[ i ] != logged_locked[ i ] )
+            {
+                logged_locked[ i ] = locked_ui[ i ];
+                CCore::g_instance->info( "trailer {} locked={}", i, locked_ui[ i ] );
+            }
+        }
+
         // nothing to steer on a trailer without steerable wheels, or one that is gone
         for ( uint32_t i = 0; i < max_trailers; ++i )
         {
@@ -167,14 +205,34 @@ namespace ts_extra_utilities
             }
         }
 
+        // diagnostic: watch every bound key's physical state, outside the focus/capture gate,
+        // so the log shows whether a press arrived and why it would have been ignored
+        static bool diag_was[ settings::action_count ] = {};
+        for ( int a = 0; a < settings::action_count; ++a )
+        {
+            const auto vk = settings::key( static_cast< settings::Action >( a ) );
+            const bool down = vk != 0 && ( GetAsyncKeyState( static_cast< int >( vk ) ) & 0x8000 ) != 0;
+            if ( down && !diag_was[ a ] )
+            {
+                CCore::g_instance->info( "key down: {} (vk={}) focus={} capturing={}",
+                    settings::action_name( static_cast< settings::Action >( a ) ), vk,
+                    game_has_focus(), settings::is_capturing() );
+            }
+            diag_was[ a ] = down;
+        }
+
         // hotkeys, ignored while the game is in the background or a key is being rebound
         if ( game_has_focus() && !settings::is_capturing() )
         {
-            bool lock_pressed = false, center_pressed = false;
+            bool lock_pressed = false, center_pressed = false, left_press = false, right_press = false;
             key_down( settings::Action::TOGGLE_STEERING_LOCK, &lock_pressed );
             key_down( settings::Action::STEER_CENTER, &center_pressed );
-            const bool left = key_down( settings::Action::STEER_LEFT );
-            const bool right = key_down( settings::Action::STEER_RIGHT );
+            const bool left = key_down( settings::Action::STEER_LEFT, &left_press );
+            const bool right = key_down( settings::Action::STEER_RIGHT, &right_press );
+            if ( lock_pressed ) CCore::g_instance->info( "key: steering lock toggled" );
+            if ( left_press ) CCore::g_instance->info( "key: steer left down" );
+            if ( right_press ) CCore::g_instance->info( "key: steer right down" );
+            if ( center_pressed ) CCore::g_instance->info( "key: steer center" );
 
             bool any_locked = false;
             for ( uint32_t i = 0; i < trailer_count; ++i ) any_locked |= locked_ui[ i ];
