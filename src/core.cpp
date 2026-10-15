@@ -120,8 +120,9 @@ namespace ts_extra_utilities
         auto& io = ImGui::GetIO();
         if ( this->disable_in_game_mouse )
         {
-            io.MousePos.x = last_mouse_pos_x_;
-            io.MousePos.y = last_mouse_pos_y_;
+            // release the cursor at the center of the screen, then leave it free
+            io.MousePos.x = io.DisplaySize.x * 0.5f;
+            io.MousePos.y = io.DisplaySize.y * 0.5f;
         }
         else
         {

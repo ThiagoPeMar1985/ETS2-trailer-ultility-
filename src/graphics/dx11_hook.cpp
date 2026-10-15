@@ -49,6 +49,8 @@ namespace ts_extra_utilities
             if ( SUCCEEDED( swap_chain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)) ) )
             {
                 ImGui::CreateContext();
+                // fonte levemente maior para 4K (default 13px -> ~16px)
+                ImGui::GetIO().FontGlobalScale = 1.25f;
 
                 device->GetImmediateContext( &device_context );
 
