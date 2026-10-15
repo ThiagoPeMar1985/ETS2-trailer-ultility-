@@ -30,7 +30,6 @@ namespace ts_extra_utilities
     bool locked_ui[ max_trailers ] = {};
     float angle_ui[ max_trailers ] = {};
     bool centering_ui[ max_trailers ] = {}; // easing back to 0 at steering_speed
-    bool brake_release_ui[ max_trailers ] = {}; // keep writing 0 to the brake channels
 
     std::shared_ptr< CFunctionHook > set_individual_steering_hook = nullptr;
     std::shared_ptr< CFunctionHook > crashes_when_disconnected_hook = nullptr;
@@ -105,37 +104,7 @@ namespace ts_extra_utilities
         connect_slave_hook->get_original< prism::physics_trailer_u_connect_slave_fn >()( self );
     }
 
-    // diagnostics: every write to trailer+0x760 goes through one of these two
-    // setters. Log which value gets pushed onto trailers we know, and where the
-    // call came from (return address as a module-relative offset), so the
-    // re-braking broadcast can be traced back to its caller
     using brake_setter_fn = void __fastcall( void* /*vehicle*/, float /*value*/ );
-
-    void log_brake_write( const char* which, void* self, float v, void* ret )
-    {
-        bool known = self == truck_towed;
-        for ( uint32_t i = 0; i < trailer_count && !known; ++i ) known |= trailers[ i ] == self;
-        if ( !known ) return;
-
-        struct Seen { void* self = nullptr; float last = -1.f; uint32_t last_ms = 0; };
-        static Seen seen[ max_trailers ];
-        Seen* s = nullptr;
-        for ( auto& e : seen )
-        {
-            if ( e.self == self ) { s = &e; break; }
-            if ( e.self == nullptr ) { s = &e; s->self = self; break; }
-        }
-        if ( s == nullptr ) return;
-
-        const uint32_t now = GetTickCount();
-        if ( s->last != v || now - s->last_ms > 1000 )
-        {
-            CCore::g_instance->info( "brake[{}] {:p} = {:.3f} from ret={:#x}", which, self, v,
-                reinterpret_cast< uint64_t >( ret ) - reinterpret_cast< uint64_t >( GetModuleHandle( nullptr ) ) );
-            s->last = v;
-            s->last_ms = now;
-        }
-    }
 
     // The parked set's per-frame update pushes spring brake (1.0) onto its chain
     // head and the setter tail-propagates it down every trailer_slave link. A
@@ -145,14 +114,12 @@ namespace ts_extra_utilities
     // parking brake while it is physically coupled to the truck.
     void __fastcall hk_brake_chain_setter( void* self, float v )
     {
-        log_brake_write( "chain", self, v, _ReturnAddress() );
         if ( self == truck_towed && v > 0.f ) return;
         brake_chain_setter_hook->get_original< brake_setter_fn >()( self, v );
     }
 
     void __fastcall hk_brake_setter( void* self, float v )
     {
-        log_brake_write( "flat", self, v, _ReturnAddress() );
         if ( self == truck_towed && v > 0.f ) return;
         brake_setter_hook->get_original< brake_setter_fn >()( self, v );
     }
@@ -298,8 +265,9 @@ namespace ts_extra_utilities
                 connect_slave_address,
                 reinterpret_cast< uint64_t >( &hk_connect_slave ) );
 
-            // diagnostic taps on the trailer+0x760 brake writers; logging only,
-            // they always run the original
+            // hooks on the trailer+0x760 brake setters: they swallow positive
+            // writes aimed at the trailer on the fifth wheel so the parked set
+            // cannot re-brake it through the shared trailer chain
             const auto brake_chain_setter_address = memory::get_address_for_pattern(
                 "f3 0f 11 89 60 07 00 00 48 8b 89 88 10 00 00" );
             const auto brake_setter_address = memory::get_address_for_pattern(
@@ -512,22 +480,8 @@ namespace ts_extra_utilities
             const bool right = key_down( settings::Action::STEER_RIGHT, &right_press );
             if ( lock_pressed ) CCore::g_instance->info( "key: steering lock toggled" );
 
-            // attach/detach hotkeys: one key toggles a trailer against its chain parent,
-            // the truck variants connect that trailer straight to the fifth wheel
-            if ( connect_valid_ )
-            {
-                bool ad1 = false, ad2 = false, ad3 = false, tk2 = false, tk3 = false;
-                key_down( settings::Action::ATTACH_DETACH_1, &ad1 );
-                key_down( settings::Action::ATTACH_DETACH_2, &ad2 );
-                key_down( settings::Action::ATTACH_DETACH_3, &ad3 );
-                key_down( settings::Action::ATTACH_TRUCK_2, &tk2 );
-                key_down( settings::Action::ATTACH_TRUCK_3, &tk3 );
-                if ( ad1 ) this->toggle_attach( 0 );
-                if ( ad2 ) this->toggle_attach( 1 );
-                if ( ad3 ) this->toggle_attach( 2 );
-                if ( tk2 ) this->connect_to_truck( 1 );
-                if ( tk3 ) this->connect_to_truck( 2 );
-            }
+            // attach/detach runs from the window buttons only, on purpose: a
+            // hotkey would let a trailer come loose at the wrong position
             if ( left_press ) CCore::g_instance->info( "key: steer left down" );
             if ( right_press ) CCore::g_instance->info( "key: steer right down" );
             if ( center_pressed ) CCore::g_instance->info( "key: steer center" );
@@ -580,38 +534,6 @@ namespace ts_extra_utilities
             }
         }
 
-        // diagnostics: pinned trailers get their brake channels forced every frame —
-        // useful to find out whether the game keeps re-applying the parking brake.
-        // The brake fields are cleared on the trailer itself, on its inner object
-        // (+0x30) and on the wheel-dyn owner (+0x150 -> +0x10) since the wheel
-        // brake may live on a sibling physics object.
-        for ( uint32_t i = 0; i < max_trailers; ++i )
-        {
-            if ( i >= trailer_count ) brake_release_ui[ i ] = false;
-            if ( !brake_release_ui[ i ] ) continue;
-            void* objs[ 3 ] = { trailers[ i ], nullptr, nullptr };
-            objs[ 1 ] = prism::offsets::field< void* >( objs[ 0 ], 0x30 );
-            if ( void* wd = prism::offsets::field< void* >( objs[ 0 ], 0x150 ) )
-            {
-                objs[ 2 ] = prism::offsets::field< void* >( wd, 0x10 );
-            }
-            for ( void* o : objs )
-            {
-                if ( o == nullptr ) continue;
-                auto& brake = prism::offsets::field< float >( o, prism::offsets::trailer_brake );
-                if ( brake != 0.f )
-                {
-                    static uint32_t force_count = 0;
-                    if ( ++force_count % 100 == 0 )
-                    {
-                        CCore::g_instance->info( "trailer {} brake channel keeps being set to {:.2f} on {:p} (forced {}x)", i, brake, o, force_count );
-                    }
-                    brake = 0.f;
-                }
-                prism::offsets::field< float >( o, prism::offsets::trailer_service_brake ) = 0.f;
-                prism::offsets::field< uint8_t >( o, prism::offsets::trailer_brake_forced ) = 0;
-            }
-        }
     }
 
     void CTrailerManipulation::disconnect_trailer( const uint32_t i ) const
@@ -806,7 +728,9 @@ namespace ts_extra_utilities
 
     void CTrailerManipulation::toggle_attach( const uint32_t i ) const
     {
-        if ( i >= trailer_count ) return;
+        // the first trailer stays on the game's own T key: its detach path is not
+        // safe to replay manually
+        if ( i == 0 || i >= trailer_count ) return;
         if ( joint( trailers[ i ] ) != nullptr )
         {
             this->disconnect_trailer( i );
@@ -819,6 +743,14 @@ namespace ts_extra_utilities
 
     void CTrailerManipulation::render_trailer_connect( const uint32_t i ) const
     {
+        // the first trailer belongs to the game's own T key; the plugin only
+        // manages the trailers behind it
+        if ( i == 0 )
+        {
+            ImGui::TextDisabled( "Managed by the game (T key)" );
+            return;
+        }
+
         ImGui::SeparatorText( "Connect/Disconnect" );
         if ( !this->connect_valid_ )
         {
@@ -843,7 +775,7 @@ namespace ts_extra_utilities
 
         // picking up a trailer behind the first one with the truck directly, only
         // possible while the fifth wheel is free (trailer 1 detached or absent)
-        if ( i > 0 && !attached )
+        if ( !attached )
         {
             const bool wheel_free = truck_towed == nullptr && ( trailer_count == 0 || joint( trailers[ 0 ] ) == nullptr );
             ImGui::BeginDisabled( !wheel_free );
@@ -856,96 +788,6 @@ namespace ts_extra_utilities
             {
                 ImGui::SameLine();
                 ImGui::TextDisabled( "(fifth wheel occupied)" );
-            }
-        }
-
-        // live brake/park state + manual release while we track down what keeps a
-        // manually connected trailer braked
-        void* t = trailers[ i ];
-        const float brake = prism::offsets::field< float >( t, prism::offsets::trailer_brake );
-        const float service = prism::offsets::field< float >( t, prism::offsets::trailer_service_brake );
-        const auto forced = prism::offsets::field< uint8_t >( t, prism::offsets::trailer_brake_forced );
-        const auto parked = prism::offsets::field< uint8_t >( t, prism::offsets::trailer_parked );
-        void* conn = prism::offsets::field< void* >( t, 0x288 );
-        const auto conn_state = conn != nullptr ? prism::offsets::field< uint32_t >( conn, 0xC98 ) : 0;
-        ImGui::TextDisabled( "brake=%.2f service=%.2f forced=%u parked=%u joint=%s conn_state=%u",
-            brake, service, forced, parked, attached ? "yes" : "no", conn_state );
-        if ( ImGui::Button( "Release brakes##trailer" ) )
-        {
-            void* objs[ 3 ] = { t, prism::offsets::field< void* >( t, 0x30 ), nullptr };
-            if ( void* wd = prism::offsets::field< void* >( t, 0x150 ) )
-            {
-                objs[ 2 ] = prism::offsets::field< void* >( wd, 0x10 );
-            }
-            for ( void* o : objs )
-            {
-                if ( o == nullptr ) continue;
-                prism::offsets::field< float >( o, prism::offsets::trailer_brake ) = 0.f;
-                prism::offsets::field< float >( o, prism::offsets::trailer_service_brake ) = 0.f;
-                prism::offsets::field< uint8_t >( o, prism::offsets::trailer_brake_forced ) = 0;
-            }
-            CCore::g_instance->info( "trailer {} brakes released manually (was brake={:.2f} forced={})", i, brake, forced );
-        }
-        ImGui::SameLine();
-        bool keep = brake_release_ui[ i ];
-        if ( ImGui::Checkbox( "keep released##brake", &keep ) )
-        {
-            brake_release_ui[ i ] = keep;
-            CCore::g_instance->info( "trailer {} keep-released = {}", i, keep );
-        }
-
-        if ( ImGui::Button( "Dump state to log##trailer" ) )
-        {
-            CCore::g_instance->info( "=== trailer {} @ {:p} ===", i, t );
-            CCore::g_instance->info( "  joint={:p} brake={:.3f} service={:.3f} forced={} parked={} parked_obj={:p}",
-                joint( t ), brake, service, forced, parked,
-                prism::offsets::field< void* >( t, prism::offsets::trailer_parked_state ) );
-            void* rear_conn = prism::offsets::field< void* >( t, 0x260 );
-            CCore::g_instance->info( "  rear_conn(+0x260)={:p} state={}", rear_conn,
-                rear_conn != nullptr ? prism::offsets::field< uint32_t >( rear_conn, 0xC98 ) : 0u );
-            CCore::g_instance->info( "  front_conn(+0x288)={:p} state={} peer={:p}", conn, conn_state,
-                conn != nullptr ? prism::offsets::field< void* >( conn, 0x1F8 ) : nullptr );
-            // related objects: +0x30 is the inner/context object the trailer updaters
-            // dereference, +0x150 is the wheel-dyn (its +0x10 points back to the owner).
-            // If the real brake lives on a sibling object, these show it.
-            void* inner = prism::offsets::field< void* >( t, 0x30 );
-            if ( inner != nullptr )
-            {
-                CCore::g_instance->info( "  inner(+0x30)={:p} joint={:p} brake={:.3f} service={:.3f} forced={} slave={:p}",
-                    inner,
-                    prism::offsets::field< void* >( inner, prism::offsets::trailer_physics_joint ),
-                    prism::offsets::field< float >( inner, prism::offsets::trailer_brake ),
-                    prism::offsets::field< float >( inner, prism::offsets::trailer_service_brake ),
-                    prism::offsets::field< uint8_t >( inner, prism::offsets::trailer_brake_forced ),
-                    prism::offsets::field< void* >( inner, prism::offsets::trailer_slave ) );
-            }
-            void* wheel_dyn = prism::offsets::field< void* >( t, 0x150 );
-            if ( wheel_dyn != nullptr )
-            {
-                CCore::g_instance->info( "  wheel_dyn(+0x150)={:p} owner(+0x10)={:p}", wheel_dyn,
-                    prism::offsets::field< void* >( wheel_dyn, 0x10 ) );
-            }
-            CCore::g_instance->info( "  +0x250={} +0x2A0={} +0xFDB={} +0xFD9={} slave={:p}",
-                prism::offsets::field< uint32_t >( t, 0x250 ),
-                prism::offsets::field< uint32_t >( t, 0x2A0 ),
-                prism::offsets::field< uint8_t >( t, 0xFDB ),
-                prism::offsets::field< uint8_t >( t, 0xFD9 ),
-                prism::offsets::field< void* >( t, prism::offsets::trailer_slave ) );
-
-            // the truck's own brake channels + which trailer it broadcasts to:
-            // a manually attached trailer only gets its brakes released if the
-            // truck's towed-trailer pointer (+0x15A8) targets it
-            if ( auto* game_actor = CCore::g_instance->get_game_actor() )
-            {
-                void* truck = prism::offsets::field< void* >( game_actor, prism::offsets::game_actor_truck );
-                if ( truck != nullptr )
-                {
-                    CCore::g_instance->info( "  truck @ {:p}: towed(+0x15A8)={:p} brake={:.3f} service={:.3f} forced={}",
-                        truck, prism::offsets::field< void* >( truck, 0x15A8 ),
-                        prism::offsets::field< float >( truck, prism::offsets::trailer_brake ),
-                        prism::offsets::field< float >( truck, prism::offsets::trailer_service_brake ),
-                        prism::offsets::field< uint8_t >( truck, prism::offsets::trailer_brake_forced ) );
-                }
             }
         }
     }
