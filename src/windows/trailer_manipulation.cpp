@@ -480,8 +480,21 @@ namespace ts_extra_utilities
             const bool right = key_down( settings::Action::STEER_RIGHT, &right_press );
             if ( lock_pressed ) CCore::g_instance->info( "key: steering lock toggled" );
 
-            // attach/detach runs from the window buttons only, on purpose: a
-            // hotkey would let a trailer come loose at the wrong position
+            // attach/detach hotkeys: one key toggles a trailer against its chain parent,
+            // the truck variants connect that trailer straight to the fifth wheel.
+            // Trailer 1 (index 0) is left to the game's own T key
+            if ( connect_valid_ )
+            {
+                bool ad2 = false, ad3 = false, tk2 = false, tk3 = false;
+                key_down( settings::Action::ATTACH_DETACH_2, &ad2 );
+                key_down( settings::Action::ATTACH_DETACH_3, &ad3 );
+                key_down( settings::Action::ATTACH_TRUCK_2, &tk2 );
+                key_down( settings::Action::ATTACH_TRUCK_3, &tk3 );
+                if ( ad2 ) this->toggle_attach( 1 );
+                if ( ad3 ) this->toggle_attach( 2 );
+                if ( tk2 ) this->connect_to_truck( 1 );
+                if ( tk3 ) this->connect_to_truck( 2 );
+            }
             if ( left_press ) CCore::g_instance->info( "key: steer left down" );
             if ( right_press ) CCore::g_instance->info( "key: steer right down" );
             if ( center_pressed ) CCore::g_instance->info( "key: steer center" );

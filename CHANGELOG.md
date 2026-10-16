@@ -1,9 +1,9 @@
 2.0
     - Individually detachable trailers, ported to 1.61.1.9: per-trailer
-      Connect/Disconnect buttons for trailers 2-3 (the first trailer stays on the
-      game's own T key). Disconnect drops the landing gear and the joint; Connect
-      re-attaches the trailer to whatever is ahead of it in the chain.
-      Singleplayer only
+      Connect/Disconnect buttons and keybinds for trailers 2-3 (the first trailer
+      stays on the game's own T key). Disconnect drops the landing gear and the
+      joint; Connect re-attaches the trailer to whatever is ahead of it in the
+      chain. Singleplayer only
     - "Attach trailer to truck": connect a rear trailer straight to the fifth wheel
       — park a trailer at a dock, haul the rest, come back and pick it up. Refused
       while the fifth wheel is occupied

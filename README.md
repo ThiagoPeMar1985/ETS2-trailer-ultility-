@@ -33,8 +33,9 @@ opening the plugin window.
 - **Individually detachable trailers** (multi-trailer / rodotren support)
    - Detach and re-attach each trailer on its own — detach the last trailer at a
      dock, haul the rest, come back and pick it up
-   - Per-trailer Connect/Disconnect buttons in the window; deliberately not
-     bindable to keys so a trailer cannot come loose at the wrong moment
+   - Per-trailer Connect/Disconnect buttons plus configurable keybinds:
+     attach/detach trailers 2 and 3 against their chain parent, or hook them
+     straight to the truck (the first trailer stays on the game's T key)
    - **Attach trailer to truck**: connect a rear trailer straight to the fifth
      wheel while the rest of the set stays parked
    - Reconnected trailers release their brakes and roll normally — the plugin

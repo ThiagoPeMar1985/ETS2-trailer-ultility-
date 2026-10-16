@@ -12,6 +12,10 @@ namespace ts_extra_utilities::settings
         STEER_RIGHT,
         STEER_CENTER,
         TOGGLE_STEERING_LOCK,
+        ATTACH_DETACH_2, // toggle attach/detach of trailer 2 (to trailer 1)
+        ATTACH_DETACH_3, // toggle attach/detach of trailer 3 (to trailer 2)
+        ATTACH_TRUCK_2, // connect trailer 2 directly to the truck
+        ATTACH_TRUCK_3, // connect trailer 3 directly to the truck
         COUNT,
     };
 
