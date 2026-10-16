@@ -614,6 +614,17 @@ namespace ts_extra_utilities
                 : trailers[ i - 1 ];
         }
 
+        // a trailer can only leave while nothing is still jointed behind it —
+        // detaching a middle link leaves the rear trailer hanging on a detached
+        // parent, a state the physics solver cannot initialize (purecall crash).
+        // A trailer parked on the truck does not count: its joint is the truck's
+        void* next = i + 1 < trailer_count ? trailers[ i + 1 ] : nullptr;
+        if ( next != nullptr && next != truck_towed && joint( next ) != nullptr )
+        {
+            CCore::g_instance->warning( "Detach trailer {} first", i + 1 );
+            return;
+        }
+
         CCore::g_instance->info( "Disconnecting trailer {}", i );
         queue_op( pending_kind::disconnect, trailer, parent, i == 0 || on_truck );
     }
@@ -772,6 +783,14 @@ namespace ts_extra_utilities
             CCore::g_instance->warning( "Cannot connect trailer {}: no parent found", i );
             return;
         }
+        // the chain parent must be attached itself — the game only ever creates
+        // a joint onto an already-jointed parent; hooking onto a free trailer
+        // leaves the component half-initialized (purecall crash)
+        if ( i > 0 && joint( parent ) == nullptr )
+        {
+            CCore::g_instance->warning( "Attach trailer {} first", i );
+            return;
+        }
         // back on its chain parent: the game may manage this trailer again
         unmark_detached( trailers[ i ] );
         queue_op( pending_kind::connect, trailers[ i ], parent, i == 0 );
@@ -788,6 +807,14 @@ namespace ts_extra_utilities
         if ( joint( trailers[ 0 ] ) != nullptr || truck_towed != nullptr )
         {
             CCore::g_instance->warning( "Truck already has a trailer attached" );
+            return;
+        }
+
+        // cannot lift a trailer that still tows another one onto the fifth wheel
+        void* next = i + 1 < trailer_count ? trailers[ i + 1 ] : nullptr;
+        if ( next != nullptr && next != truck_towed && joint( next ) != nullptr )
+        {
+            CCore::g_instance->warning( "Detach trailer {} first", i + 1 );
             return;
         }
 
