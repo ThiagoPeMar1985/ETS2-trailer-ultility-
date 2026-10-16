@@ -21,7 +21,6 @@ namespace ts_extra_utilities
         void disconnect_trailer( uint32_t i ) const;
         void toggle_attach( uint32_t i ) const;
         void connect_to_truck( uint32_t i ) const;
-        void do_connect( void* trailer, void* parent, bool parent_is_truck ) const;
 
     public:
         CTrailerManipulation();

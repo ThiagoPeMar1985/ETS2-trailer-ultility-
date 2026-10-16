@@ -76,12 +76,56 @@ namespace ts_extra_utilities
         for ( void*& d : detached_trailers ) if ( d == trailer ) d = nullptr;
     }
 
+    void connect_now( void* trailer, void* parent, bool parent_is_truck );
+    void disconnect_now( void* trailer, void* parent, bool parent_is_truck );
+
+    // Connect/disconnect calls the game's own vfuncs, which must run on the
+    // simulation thread — but update()/the UI run on the render thread, where
+    // calling them races the physics update (pure virtual call crashes). The
+    // buttons/keys only queue the operation; it is executed inside the hooked
+    // per-frame trailer call below, which the game itself runs on the sim thread
+    enum class pending_kind { none, connect, disconnect };
+
+    struct pending_op
+    {
+        pending_kind kind = pending_kind::none;
+        void* trailer = nullptr;
+        void* parent = nullptr;
+        bool parent_is_truck = false;
+    };
+
+    pending_op pending;
+
+    bool queue_op( const pending_kind kind, void* trailer, void* parent, const bool parent_is_truck )
+    {
+        if ( pending.kind != pending_kind::none )
+        {
+            CCore::g_instance->warning( "Another trailer connect/disconnect is still in progress" );
+            return false;
+        }
+        pending = { kind, trailer, parent, parent_is_truck };
+        return true;
+    }
+
     /**
      * \brief The original dereferences the trailer's physics joint, which is null on a
      * detached trailer. Skip only that case and run the original otherwise.
      */
     void hk_crashes_when_disconnected( prism::physics_trailer_u* self, prism::game_trailer_actor_u* trailer )
     {
+        if ( pending.kind != pending_kind::none )
+        {
+            const pending_op op = pending;
+            pending = {};
+            if ( op.kind == pending_kind::connect )
+            {
+                connect_now( op.trailer, op.parent, op.parent_is_truck );
+            }
+            else
+            {
+                disconnect_now( op.trailer, op.parent, op.parent_is_truck );
+            }
+        }
         if ( trailer != nullptr &&
             prism::offsets::field< void* >( trailer, prism::offsets::trailer_physics_joint ) == nullptr )
         {
@@ -562,6 +606,11 @@ namespace ts_extra_utilities
         }
 
         CCore::g_instance->info( "Disconnecting trailer {}", i );
+        queue_op( pending_kind::disconnect, trailer, parent, i == 0 || on_truck );
+    }
+
+    void disconnect_now( void* trailer, void* parent, const bool parent_is_truck )
+    {
         // brace down first, while the joint still exists, then drop the joint
         vcall< prism::physics_trailer_u_set_trailer_brace_fn >( trailer, prism::offsets::vfunc_set_brace, true );
         vcall< prism::physics_trailer_u_disconnect_fn >( trailer, prism::offsets::vfunc_disconnect );
@@ -581,7 +630,7 @@ namespace ts_extra_utilities
         prism::offsets::field< float >( trailer, prism::offsets::trailer_service_brake ) = 0.f;
         if ( parent != nullptr )
         {
-            if ( i == 0 || on_truck ) // parent is the truck
+            if ( parent_is_truck )
             {
                 // truck-side bookkeeping only; on a trailer parent those fields are
                 // something else and the refcounted store would corrupt them
@@ -609,10 +658,10 @@ namespace ts_extra_utilities
                 prism::offsets::field< void* >( trailer, prism::offsets::trailer_slave ) = slave;
             }
         }
-        if ( on_truck ) truck_towed = nullptr;
+        if ( trailer == truck_towed ) truck_towed = nullptr;
     }
 
-    void CTrailerManipulation::do_connect( void* trailer, void* parent, const bool parent_is_truck ) const
+    void connect_now( void* trailer, void* parent, const bool parent_is_truck )
     {
         float3_t vec{};
         if ( parent_is_truck )
@@ -716,7 +765,7 @@ namespace ts_extra_utilities
         }
         // back on its chain parent: the game may manage this trailer again
         unmark_detached( trailers[ i ] );
-        do_connect( trailers[ i ], parent, i == 0 );
+        queue_op( pending_kind::connect, trailers[ i ], parent, i == 0 );
     }
 
     void CTrailerManipulation::connect_to_truck( const uint32_t i ) const
@@ -735,8 +784,11 @@ namespace ts_extra_utilities
 
         // stays marked as detached: its chain parent still claims it logically, so
         // connect_slave must keep refusing it while it sits on the fifth wheel
-        do_connect( trailers[ i ], prism::offsets::field< void* >( game_actor, prism::offsets::game_actor_truck ), true );
-        truck_towed = trailers[ i ];
+        if ( queue_op( pending_kind::connect, trailers[ i ],
+            prism::offsets::field< void* >( game_actor, prism::offsets::game_actor_truck ), true ) )
+        {
+            truck_towed = trailers[ i ];
+        }
     }
 
     void CTrailerManipulation::toggle_attach( const uint32_t i ) const
