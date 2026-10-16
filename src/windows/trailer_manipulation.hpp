@@ -15,6 +15,10 @@ namespace ts_extra_utilities
         bool valid_ = false;
         bool connect_valid_ = false; // connect/disconnect needs two extra hooks; tracked separately
 
+        void refresh_trailer_chain();
+        void update_convoy_state();
+        void gc_detached_marks();
+        void update_steering( float dt );
         void render_trailer_steering( uint32_t i ) const;
         void render_trailer_connect( uint32_t i ) const;
         void connect_trailer( uint32_t i ) const;

@@ -18,6 +18,7 @@ namespace ts_extra_utilities::prism::offsets
 {
     constexpr uint32_t game_actor_truck = 0x0018; // game_physics_vehicle_u*, the player's truck
     constexpr uint32_t game_actor_trailer = 0x00C8; // game_trailer_actor_u*, first trailer
+    constexpr uint32_t trailer_parent = 0x1080; // game_trailer_actor_u*, previous trailer in the chain
     constexpr uint32_t trailer_slave = 0x1088; // game_trailer_actor_u*, next trailer in the chain
     constexpr uint32_t trailer_steering = 0x06B8; // float, -1..1, written by the game every advance
     constexpr uint32_t trailer_steering_data = 0x06C0; // vehicle_wheel_steering_data_t*, null when not steerable
