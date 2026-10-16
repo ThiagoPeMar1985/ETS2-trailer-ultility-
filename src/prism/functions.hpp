@@ -38,8 +38,37 @@ namespace ts_extra_utilities
         using vehicle_distribute_towed_mass_fn = void __fastcall( void* /*vehicle*/, float, float );
         using game_actor_refresh_axle_lift_fn = void __fastcall( void* /*game_actor*/ );
 
+        // Component-notification pair the native T attach/detach calls on BOTH
+        // vehicles around the connect/disconnect vfuncs: every component on the
+        // vehicle's +0xE98 list (cargo constraints, cable accessories, joints)
+        // gets told the coupling state changed. Without these calls a loaded
+        // trailer's cargo constraints keep stale coupling state and the physics
+        // sweep aborts on them.
+        using vehicle_notify_coupled_fn = void __fastcall( void* /*vehicle*/, uint8_t, uint8_t );
+        using vehicle_notify_decoupled_fn = void __fastcall( void* /*vehicle*/ );
+        // truck-side joint release the native detach runs BEFORE the disconnect
+        // vfunc while the truck's coupling state is still nonzero
+        using vehicle_pre_detach_fn = void __fastcall( void* /*truck*/, void* /*trailer*/ );
+
+        // accessory event refresh the native attach AND detach run on the trailer
+        // right after the brace setter: fires coupling events at every accessory
+        // on the trailer's +0x158/+0x10A8 lists (cargo, traffic-obstacle anchors).
+        // Skipping it leaves a parked trailer's traffic lane modifier unanchored
+        using vehicle_refresh_accessories_fn = void __fastcall( void* /*parent vehicle*/, void* /*trailer*/ );
+
+        // the native detach binds the parked trailer's traffic-obstacle anchor:
+        // the trailer actor's provider (actor+0x1F0) vfunc+0x28 hands over the
+        // anchor object which then gets registered at the vehicle's transform.
+        // Without it the lane modifier keeps a null owner and the traffic sweep
+        // dereferences it whenever AI traffic comes near the parked trailer
+        using vehicle_get_transform_fn = void* __fastcall( void* /*vehicle*/, void* /*out32*/ );
+        using provider_get_anchor_fn = void* __fastcall( void* /*provider*/ );
+        using traffic_register_anchor_fn = void __fastcall( void* /*anchor*/, const void* /*transform32*/, void* /*ctx*/ );
+
         // console line executor: rcx is a char** holding the command text and the
         // game passes -1 as the queue context for direct execution
         using console_execute_line_fn = void __fastcall( char** /*command text*/, int /*queue ctx*/ );
+        // reads a cvar's effective float value (walks the override chain at +0x120)
+        using cvar_get_float_fn = float __fastcall( void* /*cvar object*/ );
     }
 }

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstring>
 
 #include "imgui.h"
 
@@ -41,7 +43,24 @@ namespace ts_extra_utilities
     // native helpers replayed around connect/disconnect so a manually handled
     // trailer gets the same treatment as the game's own T-key flow
     prism::vehicle_set_towed_trailer_fn* set_towed_trailer_fn = nullptr;
+    // actually the vehicle coupled-state component notify (0x140874010), the
+    // same function the native T attach calls on both vehicles
     prism::vehicle_clear_detached_flag_fn* clear_detached_flag_fn = nullptr;
+    prism::vehicle_notify_decoupled_fn* notify_decoupled_fn = nullptr;
+    prism::vehicle_pre_detach_fn* pre_detach_fn = nullptr;
+    prism::vehicle_refresh_accessories_fn* refresh_accessories_fn = nullptr;
+    prism::traffic_register_anchor_fn* register_anchor_fn = nullptr;
+    // the world/vehicle manager singleton (rbx in the native detach): its +0x2B30
+    // subsystem gets vfunc+0x138 (pre) and +0x1E0 (post) notifications
+    void** traffic_manager_global = nullptr;
+    // game-state dword the native flow checks (== 2 while in game) before
+    // registering the parked trailer's obstacle anchor
+    uint32_t* traffic_game_state = nullptr;
+    prism::cvar_get_float_fn* get_cvar_float_fn = nullptr;
+    void* g_traffic_cvar = nullptr;
+    // g_traffic value saved before a forced "g_traffic 0" detach; restored once
+    // the whole trailer set is jointed again. < 0 means nothing saved
+    float saved_traffic = -1.f;
     prism::vehicle_rebuild_lines_fn* rebuild_lines_fn = nullptr;
     prism::vehicle_distribute_towed_mass_fn* distribute_towed_mass_fn = nullptr;
     prism::game_actor_refresh_axle_lift_fn* refresh_axle_lift_fn = nullptr;
@@ -92,6 +111,9 @@ namespace ts_extra_utilities
         void* trailer = nullptr;
         void* parent = nullptr;
         bool parent_is_truck = false;
+        // sim ticks to wait before executing — used to let AI traffic despawn
+        // after g_traffic 0 before dropping the joint
+        uint32_t delay = 0;
     };
 
     pending_op pending;
@@ -101,14 +123,21 @@ namespace ts_extra_utilities
     char pending_cmd[ 64 ] = {};
     std::atomic< bool > pending_cmd_queued{ false };
 
-    bool queue_op( const pending_kind kind, void* trailer, void* parent, const bool parent_is_truck )
+    void queue_cmd( const char* text )
+    {
+        std::strncpy( pending_cmd, text, sizeof( pending_cmd ) - 1 );
+        pending_cmd[ sizeof( pending_cmd ) - 1 ] = '\0';
+        pending_cmd_queued.store( true, std::memory_order_release );
+    }
+
+    bool queue_op( const pending_kind kind, void* trailer, void* parent, const bool parent_is_truck, const uint32_t delay = 0 )
     {
         if ( pending.kind != pending_kind::none )
         {
             CCore::g_instance->warning( "Another trailer connect/disconnect is still in progress" );
             return false;
         }
-        pending = { kind, trailer, parent, parent_is_truck };
+        pending = { kind, trailer, parent, parent_is_truck, delay };
         return true;
     }
 
@@ -118,24 +147,33 @@ namespace ts_extra_utilities
      */
     void hk_crashes_when_disconnected( prism::physics_trailer_u* self, prism::game_trailer_actor_u* trailer )
     {
-        if ( pending.kind != pending_kind::none )
-        {
-            const pending_op op = pending;
-            pending = {};
-            if ( op.kind == pending_kind::connect )
-            {
-                connect_now( op.trailer, op.parent, op.parent_is_truck );
-            }
-            else
-            {
-                disconnect_now( op.trailer, op.parent, op.parent_is_truck );
-            }
-        }
+        // console commands run first: a queued "g_traffic 0" must land before a
+        // delayed disconnect drops the joint
         if ( pending_cmd_queued.load( std::memory_order_acquire ) && execute_line_fn != nullptr )
         {
             pending_cmd_queued.store( false, std::memory_order_release );
             char* text = pending_cmd;
             execute_line_fn( &text, -1 );
+        }
+        if ( pending.kind != pending_kind::none )
+        {
+            if ( pending.delay > 0 )
+            {
+                --pending.delay;
+            }
+            else
+            {
+                const pending_op op = pending;
+                pending = {};
+                if ( op.kind == pending_kind::connect )
+                {
+                    connect_now( op.trailer, op.parent, op.parent_is_truck );
+                }
+                else
+                {
+                    disconnect_now( op.trailer, op.parent, op.parent_is_truck );
+                }
+            }
         }
         if ( trailer != nullptr &&
             prism::offsets::field< void* >( trailer, prism::offsets::trailer_physics_joint ) == nullptr )
@@ -189,6 +227,111 @@ namespace ts_extra_utilities
     void* joint( void* trailer )
     {
         return prism::offsets::field< void* >( trailer, prism::offsets::trailer_physics_joint );
+    }
+
+    // prism placement-ish { pos@0, pad, quat@0x10 } — what the 32-byte transform
+    // getter (vfunc+0xF8) returns for a vehicle's hook point in world space
+    struct hook_xform_t
+    {
+        float3_t pos;
+        float pad;
+        quat_t quat;
+    };
+
+    // world transform of a vehicle's front hook, through the same getter the
+    // native flows use (vfunc+0xF8)
+    bool hook_world( void* vehicle, hook_xform_t& out )
+    {
+        alignas( 16 ) uint8_t buf[ 0x20 ]{};
+        void* p = vcall< prism::vehicle_get_transform_fn >( vehicle, 0xF8 / 8, buf );
+        if ( p == nullptr ) return false;
+        std::memcpy( &out, p, sizeof( out ) );
+        // diagnostic: dump the raw placement once per call so the log shows
+        // which floats actually carry the world position
+        const float* f = reinterpret_cast< const float* >( p );
+        CCore::g_instance->info( "xform {:p}: {:.1f} {:.1f} {:.1f} {:.1f} | {:.1f} {:.1f} {:.1f} {:.1f}",
+            vehicle, f[ 0 ], f[ 1 ], f[ 2 ], f[ 3 ], f[ 4 ], f[ 5 ], f[ 6 ], f[ 7 ] );
+        return std::isfinite( out.pos.x ) && std::isfinite( out.pos.y ) && std::isfinite( out.pos.z ) &&
+            std::fabs( out.pos.x ) < 1e6f && std::fabs( out.pos.z ) < 1e6f;
+    }
+
+    float3_t quat_rot( const quat_t& q, const float3_t& v )
+    {
+        // t = 2 * cross(q.xyz, v);  v' = v + w*t + cross(q.xyz, t)
+        const float tx = 2.f * ( q.y * v.z - q.z * v.y );
+        const float ty = 2.f * ( q.z * v.x - q.x * v.z );
+        const float tz = 2.f * ( q.x * v.y - q.y * v.x );
+        return float3_t{
+            v.x + q.w * tx + q.y * tz - q.z * ty,
+            v.y + q.w * ty + q.z * tx - q.x * tz,
+            v.z + q.w * tz + q.x * ty - q.y * tx };
+    }
+
+    // attach offset in the parent's frame — the same vec passed to the connect
+    // vfunc: rear hook point minus the parent's own hook locator
+    float3_t attach_offset( void* parent, const bool parent_is_truck )
+    {
+        float3_t hook{};
+        if ( parent_is_truck )
+        {
+            void* chassis = prism::offsets::field< void* >( parent, prism::offsets::vehicle_chassis_data );
+            if ( chassis != nullptr )
+            {
+                hook = prism::offsets::field< float3_t >( chassis, prism::offsets::chassis_hook_position );
+            }
+        }
+        else if ( get_slave_hook_position_fn != nullptr )
+        {
+            get_slave_hook_position_fn( static_cast< prism::physics_trailer_u* >( parent ), &hook );
+        }
+        const float3_t loc = prism::offsets::field< float3_t >( parent, prism::offsets::vehicle_hook_locator );
+        return float3_t{ hook.x - loc.x, hook.y - loc.y, hook.z - loc.z };
+    }
+
+    // the native T only connects when the hooks nearly touch; our connect vfunc
+    // teleports a far trailer onto the hook in one step — an instant jump that,
+    // over a live traffic lane, leaves a component half-initialized (purecall).
+    // Gate on real hook-to-hook distance: trailer front hook vs parent rear
+    // hook in world space. The locator frame's sign convention isn't fully
+    // nailed down, so both signed offsets are measured and the nearer wins —
+    // attached-or-not, one of them is the true rear hook. Returns < 0 when it
+    // cannot be measured.
+    float hook_gap( void* trailer, void* parent, const bool parent_is_truck )
+    {
+        hook_xform_t th{}, ph{};
+        if ( trailer == nullptr || parent == nullptr ||
+            !hook_world( trailer, th ) || !hook_world( parent, ph ) )
+        {
+            return -1.f;
+        }
+        const float3_t v = attach_offset( parent, parent_is_truck );
+        const float3_t off = quat_rot( ph.quat, v );
+        const float dx = th.pos.x - ph.pos.x;
+        const float dy = th.pos.y - ph.pos.y;
+        const float dz = th.pos.z - ph.pos.z;
+        const float g_plus = std::sqrt(
+            ( dx - off.x ) * ( dx - off.x ) +
+            ( dy - off.y ) * ( dy - off.y ) +
+            ( dz - off.z ) * ( dz - off.z ) );
+        const float g_minus = std::sqrt(
+            ( dx + off.x ) * ( dx + off.x ) +
+            ( dy + off.y ) * ( dy + off.y ) +
+            ( dz + off.z ) * ( dz + off.z ) );
+        const float vlen = std::sqrt( v.x * v.x + v.y * v.y + v.z * v.z );
+        const float raw = std::sqrt( dx * dx + dy * dy + dz * dz );
+        CCore::g_instance->info( "hook pts raw={:.2f} vec={:.2f} g+={:.2f} g-={:.2f}",
+            raw, vlen, g_plus, g_minus );
+        return ( std::min )( g_plus, g_minus );
+    }
+
+    // refuse the connect when the hooks are farther apart than the native T
+    // would allow — no teleporting the trailer across the map onto the hook
+    bool hook_far( void* trailer, void* parent, const bool parent_is_truck )
+    {
+        const float gap = hook_gap( trailer, parent, parent_is_truck );
+        if ( gap < 0.f ) return false; // cannot measure: keep the old fail-open
+        CCore::g_instance->info( "Hook gap trailer {:p} to {:p}: {:.2f}m", trailer, parent, gap );
+        return gap > 4.f;
     }
 
 
@@ -290,6 +433,27 @@ namespace ts_extra_utilities
             const auto distribute_mass_address = memory::get_address_for_pattern( "48 89 6c 24 18 57 48 83 ec 50 0f 29 74 24 40 48 8b f9 0f 57" );
             const auto refresh_lift_address = memory::get_address_for_pattern( "48 8b 91 c8 00 00 00 45 32 c0 48 85 d2 74 2c 4c 8b 8a c8 06" );
             const auto exec_line_address = memory::get_address_for_pattern( "40 55 41 54 41 55 48 8d ac 24 00 f4 ff ff 48 81 ec 00 0d 00 00 44 8b ea 4c 8b e1" );
+            // the decoupled-state component notify + the truck-side joint release,
+            // both from the native T detach flow
+            const auto notify_decoupled_address = memory::get_address_for_pattern( "48 83 ec 48 80 b9 8e 0e 00 00 00 0f 84" );
+            const auto pre_detach_address = memory::get_address_for_pattern( "48 85 d2 0f 84 ? ? ? ? 48 89 5c 24 08 57 48 83 ec 20 48 8b d9 48 8b fa 48 8b 8a e0 0f 00 00" );
+            // accessory event refresh the native attach/detach fire on the trailer:
+            // without it the parked trailer's traffic-obstacle anchor stays broken
+            // and the traffic lane-modifier sweep dereferences a null owner
+            const auto refresh_accessories_address = memory::get_address_for_pattern(
+                "48 89 5c 24 08 48 89 74 24 10 57 48 83 ec 40 48 8b fa 48 8b f1 e8 ? ? ? ? 48 8b ce e8 ? ? ? ? 48 8d 8e c0 0e 00 00 e8" );
+            if ( notify_decoupled_address != 0 ) notify_decoupled_fn = reinterpret_cast< prism::vehicle_notify_decoupled_fn* >( notify_decoupled_address );
+            if ( pre_detach_address != 0 ) pre_detach_fn = reinterpret_cast< prism::vehicle_pre_detach_fn* >( pre_detach_address );
+            if ( refresh_accessories_address != 0 ) refresh_accessories_fn = reinterpret_cast< prism::vehicle_refresh_accessories_fn* >( refresh_accessories_address );
+
+            // the world/vehicle manager singleton + the parked-obstacle anchor
+            // registration + the in-game state flag, all read out of the native
+            // detach body (fixed image offsets for this build)
+            get_cvar_float_fn = reinterpret_cast< prism::cvar_get_float_fn* >( memory::get_address_from_offset( 0x1401DB560 ) );
+            g_traffic_cvar = reinterpret_cast< void* >( memory::get_address_from_offset( 0x142D45500 ) );
+            traffic_manager_global = reinterpret_cast< void** >( memory::get_address_from_offset( 0x1436AF7C8 ) );
+            register_anchor_fn = reinterpret_cast< prism::traffic_register_anchor_fn* >( memory::get_address_from_offset( 0x140284250 ) );
+            traffic_game_state = reinterpret_cast< uint32_t* >( memory::get_address_from_offset( 0x143AF1820 ) );
 
             if ( exec_line_address != 0 )
             {
@@ -451,12 +615,26 @@ namespace ts_extra_utilities
                 if ( trailer_count > 1 && in_convoy[ trailer_count - 1 ] ) mode = 2;
             }
             static uint32_t sent_cables_mode = UINT32_MAX;
-            if ( mode != sent_cables_mode && execute_line_fn != nullptr )
+            if ( mode != sent_cables_mode && execute_line_fn != nullptr &&
+                !pending_cmd_queued.load( std::memory_order_acquire ) )
             {
                 sent_cables_mode = mode;
                 snprintf( pending_cmd, sizeof( pending_cmd ), "g_trailer_cables_mode %u", mode );
                 pending_cmd_queued.store( true, std::memory_order_release );
                 CCore::g_instance->info( "g_trailer_cables_mode = {}", mode );
+            }
+
+            // traffic was zeroed for a detach: bring the saved level back only
+            // once the LAST trailer of the chain sits in the convoy again —
+            // i.e. the whole set is coupled. A pending console line defers the
+            // restore by one frame instead of being overwritten
+            if ( saved_traffic >= 0.f && trailer_count > 0 && in_convoy[ trailer_count - 1 ] &&
+                !pending_cmd_queued.load( std::memory_order_acquire ) )
+            {
+                snprintf( pending_cmd, sizeof( pending_cmd ), "g_traffic %g", saved_traffic );
+                pending_cmd_queued.store( true, std::memory_order_release );
+                CCore::g_instance->info( "restoring g_traffic = {:.2f}", saved_traffic );
+                saved_traffic = -1.f;
             }
         }
 
@@ -614,33 +792,70 @@ namespace ts_extra_utilities
                 : trailers[ i - 1 ];
         }
 
-        // a trailer can only leave while nothing is still jointed behind it —
-        // detaching a middle link leaves the rear trailer hanging on a detached
-        // parent, a state the physics solver cannot initialize (purecall crash).
-        // A trailer parked on the truck does not count: its joint is the truck's
-        void* next = i + 1 < trailer_count ? trailers[ i + 1 ] : nullptr;
-        if ( next != nullptr && next != truck_towed && joint( next ) != nullptr )
-        {
-            CCore::g_instance->warning( "Detach trailer {} first", i + 1 );
-            return;
-        }
-
+        // a middle link may leave with its slave still jointed — the detached
+        // pair (dolly + rear trailer) parks as a unit; the detach mark keeps
+        // the game from auto-re-attaching the freed link to its old parent
         CCore::g_instance->info( "Disconnecting trailer {}", i );
-        queue_op( pending_kind::disconnect, trailer, parent, i == 0 || on_truck );
+
+        // active AI traffic is what makes the detach crash: the parked trailer
+        // becomes a lane obstacle and the traffic sweep dies on it. Zero the
+        // traffic first and give the despawn ~30 sim ticks to clear the lanes
+        // before the joint actually drops. The live value is saved once —
+        // further detaches while part of the set is already out must not
+        // overwrite it with the zero we wrote ourselves
+        if ( saved_traffic < 0.f && get_cvar_float_fn != nullptr && g_traffic_cvar != nullptr )
+        {
+            saved_traffic = get_cvar_float_fn( g_traffic_cvar );
+            CCore::g_instance->info( "g_traffic before detach = {:.2f}", saved_traffic );
+        }
+        queue_cmd( "g_traffic 0" );
+        // skip the despawn wait only when traffic is known to be already zero;
+        // an unreadable cvar keeps the delay (safer than a stale lane crash)
+        queue_op( pending_kind::disconnect, trailer, parent, i == 0 || on_truck, saved_traffic == 0.f ? 0 : 30 );
+    }
+
+    // diagnostic: the crash scanner filters objects by a coupling state field
+    // (obj+0x40 -> +0x68, states 3-5 get scanned). Log it around our ops to see
+    // whether a detached loaded trailer keeps a stale coupling state
+    void log_couple_state( const char* tag, void* trailer, void* parent )
+    {
+        void* sm = prism::offsets::field< void* >( trailer, 0x40 );
+        const uint32_t st = sm != nullptr ? prism::offsets::field< uint32_t >( sm, 0x68 ) : 0xFFFFFFFF;
+        void* psm = parent != nullptr ? prism::offsets::field< void* >( parent, 0x40 ) : nullptr;
+        const uint32_t pst = psm != nullptr ? prism::offsets::field< uint32_t >( psm, 0x68 ) : 0xFFFFFFFF;
+        CCore::g_instance->info( "{} trailer {:p} sm={:p} st={} | parent {:p} sm={:p} st={}",
+            tag, trailer, sm, st, parent, psm, pst );
     }
 
     void disconnect_now( void* trailer, void* parent, const bool parent_is_truck )
     {
-        // brace down first, while the joint still exists, then drop the joint
+        log_couple_state( "pre-detach", trailer, parent );
+        // native T detach order: while the truck's coupling state is nonzero it
+        // releases the joint and fifth-wheel lock first, then drops the joint
+        if ( parent_is_truck && parent != nullptr && pre_detach_fn != nullptr &&
+            prism::offsets::field< uint32_t >( parent, prism::offsets::truck_coupling_state ) != 0 )
+        {
+            pre_detach_fn( parent, trailer );
+        }
         vcall< prism::physics_trailer_u_set_trailer_brace_fn >( trailer, prism::offsets::vfunc_set_brace, true );
         vcall< prism::physics_trailer_u_disconnect_fn >( trailer, prism::offsets::vfunc_disconnect );
+
+        // tell every component on both vehicles the coupling is gone — the
+        // native detach notifies the vehicle component list (+0xE98) on both
+        // sides; a loaded trailer's cargo constraints corrupt the physics
+        // sweep if they are never told
+        if ( notify_decoupled_fn != nullptr )
+        {
+            if ( parent != nullptr ) notify_decoupled_fn( parent );
+            notify_decoupled_fn( trailer );
+        }
 
         // registered as intentionally detached: native flows must not re-attach it
         mark_detached( trailer );
 
         // rest of the native detach sequence: flag the trailer as parked, drop the
-        // parent's towed-trailer bookkeeping and wheel load, and rebuild the lines
-        // so the hoses between the pair come down
+        // parent's wheel load, and rebuild the lines so the hoses between the
+        // pair come down
         if ( prism::offsets::field< void* >( trailer, prism::offsets::trailer_parked_state ) != nullptr )
         {
             prism::offsets::field< uint8_t >( trailer, prism::offsets::trailer_parked ) = 1;
@@ -677,31 +892,52 @@ namespace ts_extra_utilities
                 rebuild_lines_fn( parent, trailer );
                 prism::offsets::field< void* >( trailer, prism::offsets::trailer_slave ) = slave;
             }
+            // native detach fires coupling events at every accessory on the
+            // trailer (cargo, traffic-obstacle anchor) — without it the parked
+            // trailer registers a lane modifier with a null owner and the
+            // traffic sweep crashes on it near roads/docks
+            if ( refresh_accessories_fn != nullptr )
+            {
+                refresh_accessories_fn( parent, trailer );
+            }
+
+            // native detach tail: notify the traffic subsystem and bind the
+            // parked trailer's obstacle anchor through its actor's position
+            // provider — a lane modifier whose anchor stays null crashes the
+            // proximity sweep whenever AI traffic comes near
+            if ( traffic_manager_global != nullptr )
+            {
+                void* mgr = *traffic_manager_global;
+                void* sub = mgr != nullptr ? prism::offsets::field< void* >( mgr, 0x2B30 ) : nullptr;
+                if ( sub != nullptr ) vcall< prism::vehicle_notify_decoupled_fn >( sub, 0x138 / 8 );
+            }
+            // (trailer-actor anchor registration removed: no reliable way to
+            // map the physics trailer to its actor — scanning the game actor's
+            // slots dereferenced garbage and crashed the game itself)
+            if ( traffic_manager_global != nullptr )
+            {
+                void* mgr = *traffic_manager_global;
+                void* sub = mgr != nullptr ? prism::offsets::field< void* >( mgr, 0x2B30 ) : nullptr;
+                if ( sub != nullptr ) vcall< prism::vehicle_notify_decoupled_fn >( sub, 0x1E0 / 8 );
+            }
         }
         if ( trailer == truck_towed ) truck_towed = nullptr;
+        log_couple_state( "post-detach", trailer, parent );
     }
 
     void connect_now( void* trailer, void* parent, const bool parent_is_truck )
     {
-        float3_t vec{};
-        if ( parent_is_truck )
+        log_couple_state( "pre-connect", trailer, parent );
+
+        // re-check hook proximity at execution time: the trailer may have been
+        // nudged between queueing and this sim tick — never teleport it
+        if ( hook_far( trailer, parent, parent_is_truck ) )
         {
-            // hooks to the truck: chassis hook position - truck hook locator
-            void* chassis = prism::offsets::field< void* >( parent, prism::offsets::vehicle_chassis_data );
-            const float3_t hook = chassis != nullptr
-                ? prism::offsets::field< float3_t >( chassis, prism::offsets::chassis_hook_position )
-                : float3_t{};
-            const float3_t loc = prism::offsets::field< float3_t >( parent, prism::offsets::vehicle_hook_locator );
-            vec = float3_t{ hook.x - loc.x, hook.y - loc.y, hook.z - loc.z };
+            CCore::g_instance->warning( "Trailer is too far — reverse closer to attach" );
+            return;
         }
-        else
-        {
-            // slave trailer: rear hook of the trailer ahead - its own hook locator
-            float3_t hook{};
-            get_slave_hook_position_fn( static_cast< prism::physics_trailer_u* >( parent ), &hook );
-            const float3_t loc = prism::offsets::field< float3_t >( parent, prism::offsets::vehicle_hook_locator );
-            vec = float3_t{ hook.x - loc.x, hook.y - loc.y, hook.z - loc.z };
-        }
+
+        float3_t vec = attach_offset( parent, parent_is_truck );
 
         // connect_slave also propagates the parent's coupling byte to the slave and
         // passes the parent's chassis-type flag to connect(); replay both since the
@@ -758,6 +994,11 @@ namespace ts_extra_utilities
             rebuild_lines_fn( parent, trailer );
             prism::offsets::field< void* >( trailer, prism::offsets::trailer_slave ) = slave;
         }
+        // same accessory event refresh the native attach runs on the trailer
+        if ( refresh_accessories_fn != nullptr && parent != nullptr )
+        {
+            refresh_accessories_fn( parent, trailer );
+        }
         if ( parent_is_truck )
         {
             if ( distribute_towed_mass_fn != nullptr )
@@ -791,6 +1032,13 @@ namespace ts_extra_utilities
             CCore::g_instance->warning( "Attach trailer {} first", i );
             return;
         }
+        // proximity rule like the native T: hooks must nearly touch — no
+        // teleporting the trailer onto the hook (< 2 m hook-to-hook)
+        if ( hook_far( trailers[ i ], parent, i == 0 ) )
+        {
+            CCore::g_instance->warning( "Trailer {} is too far — reverse closer to attach", i + 1 );
+            return;
+        }
         // back on its chain parent: the game may manage this trailer again
         unmark_detached( trailers[ i ] );
         queue_op( pending_kind::connect, trailers[ i ], parent, i == 0 );
@@ -815,6 +1063,14 @@ namespace ts_extra_utilities
         if ( next != nullptr && next != truck_towed && joint( next ) != nullptr )
         {
             CCore::g_instance->warning( "Detach trailer {} first", i + 1 );
+            return;
+        }
+
+        // same proximity rule: no teleporting a far trailer onto the fifth wheel
+        void* truck = prism::offsets::field< void* >( game_actor, prism::offsets::game_actor_truck );
+        if ( hook_far( trailers[ i ], truck, true ) )
+        {
+            CCore::g_instance->warning( "Trailer {} is too far — reverse closer to attach", i + 1 );
             return;
         }
 
