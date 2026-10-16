@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <intrin.h>
 
 #include "imgui.h"
 
@@ -38,6 +39,8 @@ namespace ts_extra_utilities
     std::shared_ptr< CFunctionHook > connect_slave_hook = nullptr;
     std::shared_ptr< CFunctionHook > brake_chain_setter_hook = nullptr;
     std::shared_ptr< CFunctionHook > brake_setter_hook = nullptr;
+    std::shared_ptr< CFunctionHook > forced_chain_setter_hook = nullptr;
+    std::shared_ptr< CFunctionHook > forced_setter_hook = nullptr;
     prism::physics_trailer_u_get_slave_hook_position_fn* get_slave_hook_position_fn = nullptr;
 
     // native helpers replayed around connect/disconnect so a manually handled
@@ -58,9 +61,25 @@ namespace ts_extra_utilities
     uint32_t* traffic_game_state = nullptr;
     prism::cvar_get_float_fn* get_cvar_float_fn = nullptr;
     void* g_traffic_cvar = nullptr;
+    // anchor re-link the native detach runs between the two traffic-manager
+    // notifies: rebuilds type-2 obstacle registrations under the registry at
+    // *(game_actor+0x30)+0xD8
+    using anchor_relink_fn = void __fastcall( void* /*registry*/, uint32_t /*type*/ );
+    anchor_relink_fn* relink_anchors_fn = nullptr;
+    // in-flight counter the native register call brackets itself with
+    uint32_t* anchor_reg_guard = nullptr;
     // g_traffic value saved before a forced "g_traffic 0" detach; restored once
     // the whole trailer set is jointed again. < 0 means nothing saved
     float saved_traffic = -1.f;
+    // trailers the set had when traffic suppression started. The chain shrinks
+    // when links leave it, so "all coupled" must compare against this — a
+    // partially rebuilt set (e.g. just the dolly on the truck) must not count
+    uint32_t expected_trailers = 0;
+    // set only after disconnect_now actually dropped a joint. The detach waits
+    // ~30 sim ticks after g_traffic 0, and during that window every trailer
+    // still reads as coupled — without this flag the restore fires mid-delay
+    // and the joint lands with live traffic again
+    std::atomic< bool > traffic_detach_done{ false };
     prism::vehicle_rebuild_lines_fn* rebuild_lines_fn = nullptr;
     prism::vehicle_distribute_towed_mass_fn* distribute_towed_mass_fn = nullptr;
     prism::game_actor_refresh_axle_lift_fn* refresh_axle_lift_fn = nullptr;
@@ -198,23 +217,83 @@ namespace ts_extra_utilities
     }
 
     using brake_setter_fn = void __fastcall( void* /*vehicle*/, float /*value*/ );
+    using forced_setter_fn = void __fastcall( void* /*vehicle*/, uint8_t /*value*/ );
 
-    // The parked set's per-frame update pushes spring brake (1.0) onto its chain
-    // head and the setter tail-propagates it down every trailer_slave link. A
-    // trailer moved to the truck stays linked under the parked set, so it keeps
-    // getting re-braked no matter what the truck broadcasts. Swallow positive
-    // writes aimed at the trailer on the fifth wheel: nothing else may apply its
-    // parking brake while it is physically coupled to the truck.
+    void* joint( void* trailer );
+
+    // Ret sites of the +0x180/+0x188 vfunc calls inside the truck's per-frame
+    // update — the only legitimate source of positive brake writes on a coupled
+    // trailer: at coupling_state 5 the truck copies its own brake channels onto
+    // the towed chain head and the setter tail-propagates down trailer_slave
+    // links, so every propagation frame carries this same return address
+    uint64_t truck_brake_broadcast_ret = 0;
+    uint64_t truck_forced_broadcast_ret = 0;
+
+    // A trailer that leaves a parked set stays linked under it, so the set's
+    // per-frame spring-brake push keeps reaching it through the stale slave
+    // link and re-locks the wheels — no matter what the truck broadcasts. Any
+    // positive write on a JOINTED trailer that did not come from the truck's
+    // own broadcast is a parked-set write and gets swallowed
+    bool foreign_brake_write( void* self, const void* ret )
+    {
+        const auto ra = reinterpret_cast< uint64_t >( ret );
+        if ( ra == truck_brake_broadcast_ret || ra == truck_forced_broadcast_ret )
+        {
+            return false;
+        }
+        return self != nullptr && ( self == truck_towed || joint( self ) != nullptr );
+    }
+
+    // The stale parked chain may continue THROUGH a coupled link to trailers
+    // still parked behind it: resume the write on the first jointless link so
+    // those keep their spring brake
+    void* next_jointless_link( void* self )
+    {
+        void* cur = prism::offsets::field< void* >( self, prism::offsets::trailer_slave );
+        for ( int guard = 0; cur != nullptr && joint( cur ) != nullptr; ++guard )
+        {
+            if ( guard >= 32 ) return nullptr;
+            cur = prism::offsets::field< void* >( cur, prism::offsets::trailer_slave );
+        }
+        return cur;
+    }
+
     void __fastcall hk_brake_chain_setter( void* self, float v )
     {
-        if ( self == truck_towed && v > 0.f ) return;
+        if ( v > 0.f && foreign_brake_write( self, _ReturnAddress() ) )
+        {
+            if ( void* s = next_jointless_link( self ) )
+            {
+                brake_chain_setter_hook->get_original< brake_setter_fn >()( s, v );
+            }
+            return;
+        }
         brake_chain_setter_hook->get_original< brake_setter_fn >()( self, v );
     }
 
     void __fastcall hk_brake_setter( void* self, float v )
     {
-        if ( self == truck_towed && v > 0.f ) return;
+        if ( v > 0.f && foreign_brake_write( self, _ReturnAddress() ) ) return;
         brake_setter_hook->get_original< brake_setter_fn >()( self, v );
+    }
+
+    void __fastcall hk_forced_chain_setter( void* self, uint8_t v )
+    {
+        if ( v != 0 && foreign_brake_write( self, _ReturnAddress() ) )
+        {
+            if ( void* s = next_jointless_link( self ) )
+            {
+                forced_chain_setter_hook->get_original< forced_setter_fn >()( s, v );
+            }
+            return;
+        }
+        forced_chain_setter_hook->get_original< forced_setter_fn >()( self, v );
+    }
+
+    void __fastcall hk_forced_setter( void* self, uint8_t v )
+    {
+        if ( v != 0 && foreign_brake_write( self, _ReturnAddress() ) ) return;
+        forced_setter_hook->get_original< forced_setter_fn >()( self, v );
     }
 
     template < typename F, typename... A >
@@ -227,6 +306,74 @@ namespace ts_extra_utilities
     void* joint( void* trailer )
     {
         return prism::offsets::field< void* >( trailer, prism::offsets::trailer_physics_joint );
+    }
+
+    // Memory probes for navigating optional object graphs: a slot may hold
+    // garbage, so check the pointer is committed and its first qword is a
+    // vtable inside the exe image before trusting it
+    bool readable_ptr( const void* p )
+    {
+        if ( p == nullptr ) return false;
+        MEMORY_BASIC_INFORMATION mbi{};
+        return VirtualQuery( p, &mbi, sizeof( mbi ) ) != 0 && mbi.State == MEM_COMMIT &&
+            ( mbi.Protect & ( PAGE_NOACCESS | PAGE_GUARD ) ) == 0;
+    }
+
+    bool plausible_object( const void* p )
+    {
+        if ( !readable_ptr( p ) ) return false;
+        const auto base = reinterpret_cast< uint64_t >( GetModuleHandle( nullptr ) );
+        const auto vtbl = *reinterpret_cast< const uint64_t* >( p );
+        return vtbl >= base && vtbl < base + 0x4000000;
+    }
+
+    // The native detach resolves the detached trailer's actor from embedded
+    // pointer slots at game_actor+0x1D38 (0x28 stride per chain index). A
+    // slot's actor points back at its trailer at +0x18 — verify that instead
+    // of trusting the index, and probe each pointer before dereferencing it
+    void* find_trailer_actor( void* trailer, void* game_actor )
+    {
+        if ( trailer == nullptr || game_actor == nullptr ) return nullptr;
+        for ( uint32_t s = 0x1D10; s <= 0x1EA0; s += 0x28 )
+        {
+            void* actor = *reinterpret_cast< void** >( reinterpret_cast< uint8_t* >( game_actor ) + s );
+            if ( plausible_object( actor ) && readable_ptr( reinterpret_cast< uint8_t* >( actor ) + 0x20 ) &&
+                prism::offsets::field< void* >( actor, 0x18 ) == trailer )
+            {
+                return actor;
+            }
+        }
+        return nullptr;
+    }
+
+    // native attach/detach anchor update: provider -> vfunc+0x28 yields the
+    // trailer's traffic-obstacle anchor, which then gets a transform pushed
+    // through 0x140284250 (a locked update, not a register), followed by
+    // provider vfunc+0x30. Runs only while the world is in state 2.
+    void push_anchor_update( void* provider, const void* xform32 )
+    {
+        if ( provider == nullptr || !plausible_object( provider ) || register_anchor_fn == nullptr )
+        {
+            return;
+        }
+        void* anchor = vcall< prism::provider_get_anchor_fn >( provider, 0x28 / 8 );
+        if ( anchor != nullptr && traffic_game_state != nullptr && *traffic_game_state == 2 )
+        {
+            struct { void* p; uint32_t d; } ctx{};
+            if ( anchor_reg_guard != nullptr ) ++*anchor_reg_guard;
+            register_anchor_fn( anchor, xform32, &ctx );
+            if ( anchor_reg_guard != nullptr ) --*anchor_reg_guard;
+        }
+        vcall< prism::vehicle_notify_decoupled_fn >( provider, 0x30 / 8 );
+    }
+
+    // the truck's hook transform, the way the native coupling paths read it
+    bool truck_xform( void* game_actor, uint8_t* out32 )
+    {
+        void* truck = game_actor != nullptr
+            ? prism::offsets::field< void* >( game_actor, prism::offsets::game_actor_truck ) : nullptr;
+        if ( truck == nullptr ) return false;
+        return vcall< prism::vehicle_get_transform_fn >( truck, 0xF8 / 8, out32 ) != nullptr;
     }
 
     // prism placement-ish { pos@0, pad, quat@0x10 } — what the 32-byte transform
@@ -453,6 +600,8 @@ namespace ts_extra_utilities
             g_traffic_cvar = reinterpret_cast< void* >( memory::get_address_from_offset( 0x142D45500 ) );
             traffic_manager_global = reinterpret_cast< void** >( memory::get_address_from_offset( 0x1436AF7C8 ) );
             register_anchor_fn = reinterpret_cast< prism::traffic_register_anchor_fn* >( memory::get_address_from_offset( 0x140284250 ) );
+            relink_anchors_fn = reinterpret_cast< anchor_relink_fn* >( memory::get_address_from_offset( 0x140623C90 ) );
+            anchor_reg_guard = reinterpret_cast< uint32_t* >( memory::get_address_from_offset( 0x143AF1824 ) );
             traffic_game_state = reinterpret_cast< uint32_t* >( memory::get_address_from_offset( 0x143AF1820 ) );
 
             if ( exec_line_address != 0 )
@@ -484,13 +633,20 @@ namespace ts_extra_utilities
                 connect_slave_address,
                 reinterpret_cast< uint64_t >( &hk_connect_slave ) );
 
-            // hooks on the trailer+0x760 brake setters: they swallow positive
-            // writes aimed at the trailer on the fifth wheel so the parked set
-            // cannot re-brake it through the shared trailer chain
+            // hooks on the trailer+0x760/+0x764 brake setters: they swallow
+            // positive writes that did not come from the truck's own broadcast
+            // when aimed at a coupled trailer, so a stale parked-set chain
+            // cannot re-brake it through the shared trailer_slave link
+            truck_brake_broadcast_ret = memory::get_address_from_offset( 0x14064B7EF );
+            truck_forced_broadcast_ret = memory::get_address_from_offset( 0x14064B806 );
             const auto brake_chain_setter_address = memory::get_address_for_pattern(
                 "f3 0f 11 89 60 07 00 00 48 8b 89 88 10 00 00" );
             const auto brake_setter_address = memory::get_address_for_pattern(
                 "f3 0f 11 89 60 07 00 00 c3" );
+            const auto forced_chain_setter_address = memory::get_address_for_pattern(
+                "88 91 64 07 00 00 48 8b 89 88 10 00 00" );
+            const auto forced_setter_address = memory::get_address_for_pattern(
+                "88 91 64 07 00 00 c3" );
             if ( brake_chain_setter_address != 0 )
             {
                 brake_chain_setter_hook = CCore::g_instance->get_hooks_manager()->register_function_hook(
@@ -504,6 +660,20 @@ namespace ts_extra_utilities
                     "brake_setter", brake_setter_address,
                     reinterpret_cast< uint64_t >( &hk_brake_setter ) );
                 brake_setter_hook->hook();
+            }
+            if ( forced_chain_setter_address != 0 )
+            {
+                forced_chain_setter_hook = CCore::g_instance->get_hooks_manager()->register_function_hook(
+                    "forced_chain_setter", forced_chain_setter_address,
+                    reinterpret_cast< uint64_t >( &hk_forced_chain_setter ) );
+                forced_chain_setter_hook->hook();
+            }
+            if ( forced_setter_address != 0 )
+            {
+                forced_setter_hook = CCore::g_instance->get_hooks_manager()->register_function_hook(
+                    "forced_setter", forced_setter_address,
+                    reinterpret_cast< uint64_t >( &hk_forced_setter ) );
+                forced_setter_hook->hook();
             }
 
             if ( !CCore::g_instance->is_truckersmp() &&
@@ -625,16 +795,36 @@ namespace ts_extra_utilities
             }
 
             // traffic was zeroed for a detach: bring the saved level back only
-            // once the LAST trailer of the chain sits in the convoy again —
-            // i.e. the whole set is coupled. A pending console line defers the
-            // restore by one frame instead of being overwritten
-            if ( saved_traffic >= 0.f && trailer_count > 0 && in_convoy[ trailer_count - 1 ] &&
-                !pending_cmd_queued.load( std::memory_order_acquire ) )
+            // once the WHOLE original set is coupled again AND a detach has
+            // genuinely completed — during the post-command delay every joint
+            // is still alive, so the set reads as coupled while traffic would
+            // bounce straight back before the joint drops. A pending console
+            // line defers the write by a frame instead of being overwritten
+            if ( saved_traffic >= 0.f && !pending_cmd_queued.load( std::memory_order_acquire ) )
             {
-                snprintf( pending_cmd, sizeof( pending_cmd ), "g_traffic %g", saved_traffic );
-                pending_cmd_queued.store( true, std::memory_order_release );
-                CCore::g_instance->info( "restoring g_traffic = {:.2f}", saved_traffic );
-                saved_traffic = -1.f;
+                bool all_coupled = expected_trailers > 0 && trailer_count >= expected_trailers &&
+                    traffic_detach_done.load( std::memory_order_acquire );
+                for ( uint32_t i = 0; all_coupled && i < trailer_count; ++i ) all_coupled &= in_convoy[ i ];
+                // a parked detached trailer that fell out of the chain must
+                // also be back before traffic returns
+                for ( void* d : detached_trailers )
+                    if ( d != nullptr && joint( d ) == nullptr ) all_coupled = false;
+                if ( all_coupled )
+                {
+                    snprintf( pending_cmd, sizeof( pending_cmd ), "g_traffic %g", saved_traffic );
+                    pending_cmd_queued.store( true, std::memory_order_release );
+                    CCore::g_instance->info( "restoring g_traffic = {:.2f}", saved_traffic );
+                    saved_traffic = -1.f;
+                    expected_trailers = 0;
+                    traffic_detach_done.store( false, std::memory_order_release );
+                }
+                // until the whole set is back, traffic stays pinned at zero —
+                // even if it was raised by hand through the console in between
+                else if ( get_cvar_float_fn != nullptr && g_traffic_cvar != nullptr &&
+                    get_cvar_float_fn( g_traffic_cvar ) > 0.f )
+                {
+                    queue_cmd( "g_traffic 0" );
+                }
             }
         }
 
@@ -806,12 +996,18 @@ namespace ts_extra_utilities
         if ( saved_traffic < 0.f && get_cvar_float_fn != nullptr && g_traffic_cvar != nullptr )
         {
             saved_traffic = get_cvar_float_fn( g_traffic_cvar );
-            CCore::g_instance->info( "g_traffic before detach = {:.2f}", saved_traffic );
+            expected_trailers = trailer_count;
+            CCore::g_instance->info( "g_traffic before detach = {:.2f} (set size {})", saved_traffic, expected_trailers );
         }
         queue_cmd( "g_traffic 0" );
         // skip the despawn wait only when traffic is known to be already zero;
-        // an unreadable cvar keeps the delay (safer than a stale lane crash)
-        queue_op( pending_kind::disconnect, trailer, parent, i == 0 || on_truck, saved_traffic == 0.f ? 0 : 30 );
+        // an unreadable cvar keeps the delay (safer than a stale lane crash).
+        // Clearing the done flag here keeps the restore from firing during the
+        // delay — the joint is still alive and the set still reads as coupled
+        if ( queue_op( pending_kind::disconnect, trailer, parent, i == 0 || on_truck, saved_traffic == 0.f ? 0 : 30 ) )
+        {
+            traffic_detach_done.store( false, std::memory_order_release );
+        }
     }
 
     // diagnostic: the crash scanner filters objects by a coupling state field
@@ -838,6 +1034,23 @@ namespace ts_extra_utilities
             pre_detach_fn( parent, trailer );
         }
         vcall< prism::physics_trailer_u_set_trailer_brace_fn >( trailer, prism::offsets::vfunc_set_brace, true );
+
+        // the native detach pushes the parked trailer's position into its
+        // traffic-obstacle anchor BEFORE the joint drops: actor slot at
+        // game_actor+0x1D38 -> provider +0x1F0 -> anchor update at the truck's
+        // transform. Skipping it leaves the lane modifier owner stale and the
+        // traffic sweep hits it whenever the trailer sits on a road
+        if ( register_anchor_fn != nullptr )
+        {
+            void* game_actor = CCore::g_instance->get_game_actor();
+            void* actor = find_trailer_actor( trailer, game_actor );
+            void* provider = actor != nullptr && readable_ptr( reinterpret_cast< uint8_t* >( actor ) + 0x1F8 )
+                ? prism::offsets::field< void* >( actor, 0x1F0 ) : nullptr;
+            CCore::g_instance->info( "anchor: trailer {:p} actor {:p} provider {:p}", trailer, actor, provider );
+            alignas( 16 ) uint8_t xf[ 0x20 ]{};
+            truck_xform( game_actor, xf );
+            push_anchor_update( provider, xf );
+        }
         vcall< prism::physics_trailer_u_disconnect_fn >( trailer, prism::offsets::vfunc_disconnect );
 
         // tell every component on both vehicles the coupling is gone — the
@@ -911,9 +1124,18 @@ namespace ts_extra_utilities
                 void* sub = mgr != nullptr ? prism::offsets::field< void* >( mgr, 0x2B30 ) : nullptr;
                 if ( sub != nullptr ) vcall< prism::vehicle_notify_decoupled_fn >( sub, 0x138 / 8 );
             }
-            // (trailer-actor anchor registration removed: no reliable way to
-            // map the physics trailer to its actor — scanning the game actor's
-            // slots dereferenced garbage and crashed the game itself)
+            // native detach tail, part 2: re-link the type-2 obstacle anchors
+            // in the registry under *(game_actor+0x30)+0xD8 — this is what
+            // rebinds the parked trailer's lane modifier to its new owner
+            if ( relink_anchors_fn != nullptr )
+            {
+                void* game_actor = CCore::g_instance->get_game_actor();
+                void* reg = game_actor != nullptr ? prism::offsets::field< void* >( game_actor, 0x30 ) : nullptr;
+                if ( reg != nullptr && readable_ptr( reinterpret_cast< uint8_t* >( reg ) + 0xD8 ) )
+                {
+                    relink_anchors_fn( reinterpret_cast< uint8_t* >( reg ) + 0xD8, 2 );
+                }
+            }
             if ( traffic_manager_global != nullptr )
             {
                 void* mgr = *traffic_manager_global;
@@ -923,6 +1145,10 @@ namespace ts_extra_utilities
         }
         if ( trailer == truck_towed ) truck_towed = nullptr;
         log_couple_state( "post-detach", trailer, parent );
+        // joint is dead now — a detach genuinely completed, so a later "whole
+        // set coupled" state means the user re-assembled it and traffic may
+        // be restored
+        traffic_detach_done.store( true, std::memory_order_release );
     }
 
     void connect_now( void* trailer, void* parent, const bool parent_is_truck )
@@ -1009,6 +1235,31 @@ namespace ts_extra_utilities
             {
                 if ( auto* game_actor = CCore::g_instance->get_game_actor() ) refresh_axle_lift_fn( game_actor );
             }
+        }
+        // the native attach pushes the trailer's new position into its two
+        // traffic-obstacle anchors: the actor's +0x1F8 provider and the holder
+        // under trailer+0x12D8 -> +0x58. Without this the anchor stays frozen at
+        // the parked spot and the traffic sweep hits a stale owner once AI
+        // traffic comes back and reaches the area
+        if ( register_anchor_fn != nullptr )
+        {
+            void* game_actor = CCore::g_instance->get_game_actor();
+            alignas( 16 ) uint8_t xf[ 0x20 ]{};
+            truck_xform( game_actor, xf );
+
+            void* actor = find_trailer_actor( trailer, game_actor );
+            if ( actor != nullptr && readable_ptr( reinterpret_cast< uint8_t* >( actor ) + 0x200 ) )
+            {
+                void* provider = prism::offsets::field< void* >( actor, 0x1F8 );
+                CCore::g_instance->info( "attach anchor: trailer {:p} actor {:p} provider {:p}", trailer, actor, provider );
+                push_anchor_update( provider, xf );
+            }
+
+            void* holder = prism::offsets::field< void* >( trailer, 0x12D8 );
+            void* provider2 = holder != nullptr && readable_ptr( reinterpret_cast< uint8_t* >( holder ) + 0x60 )
+                ? prism::offsets::field< void* >( holder, 0x58 ) : nullptr;
+            CCore::g_instance->info( "attach anchor2: holder {:p} provider {:p}", holder, provider2 );
+            push_anchor_update( provider2, xf );
         }
     }
 
