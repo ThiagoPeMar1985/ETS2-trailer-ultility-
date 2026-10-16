@@ -96,6 +96,11 @@ namespace ts_extra_utilities
 
     pending_op pending;
 
+    // console lines have the same thread rule: execute_line must run on the sim
+    // thread, calling it from update() raced the command machinery and crashed
+    char pending_cmd[ 64 ] = {};
+    std::atomic< bool > pending_cmd_queued{ false };
+
     bool queue_op( const pending_kind kind, void* trailer, void* parent, const bool parent_is_truck )
     {
         if ( pending.kind != pending_kind::none )
@@ -125,6 +130,12 @@ namespace ts_extra_utilities
             {
                 disconnect_now( op.trailer, op.parent, op.parent_is_truck );
             }
+        }
+        if ( pending_cmd_queued.load( std::memory_order_acquire ) && execute_line_fn != nullptr )
+        {
+            pending_cmd_queued.store( false, std::memory_order_release );
+            char* text = pending_cmd;
+            execute_line_fn( &text, -1 );
         }
         if ( trailer != nullptr &&
             prism::offsets::field< void* >( trailer, prism::offsets::trailer_physics_joint ) == nullptr )
@@ -443,10 +454,8 @@ namespace ts_extra_utilities
             if ( mode != sent_cables_mode && execute_line_fn != nullptr )
             {
                 sent_cables_mode = mode;
-                char cmd[ 64 ];
-                snprintf( cmd, sizeof( cmd ), "g_trailer_cables_mode %u", mode );
-                char* text = cmd;
-                execute_line_fn( &text, -1 );
+                snprintf( pending_cmd, sizeof( pending_cmd ), "g_trailer_cables_mode %u", mode );
+                pending_cmd_queued.store( true, std::memory_order_release );
                 CCore::g_instance->info( "g_trailer_cables_mode = {}", mode );
             }
         }
