@@ -32,9 +32,9 @@ namespace ts_extra_utilities
                 ImGui::TableNextColumn();
                 if ( fixed )
                 {
-                    // these two are always Delete/Insert so the plugin can never
-                    // become unreachable
-                    ImGui::TextDisabled( "%s (fixed)", settings::key_name( settings::key( action ) ).c_str() );
+                    // rebindable in settings.ini only — keeping them off the
+                    // capture path makes the plugin unreachable harder
+                    ImGui::TextDisabled( "%s (settings.ini)", settings::key_name( settings::key( action ) ).c_str() );
                 }
                 else
                 {

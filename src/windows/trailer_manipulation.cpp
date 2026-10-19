@@ -392,39 +392,170 @@ namespace ts_extra_utilities
         const float gap = hook_gap( trailer, parent, parent_is_truck );
         if ( gap < 0.f ) return false; // cannot measure: keep the old fail-open
         CCore::g_instance->info( "Hook gap trailer {:p} to {:p}: {:.2f}m", trailer, parent, gap );
-        return gap > 4.f;
+        // bitrem chains measure ~6-7 m at touching distance — keep one limit
+        // that works for every configuration instead of one per layout
+        return gap > 7.f;
     }
 
     //========================================================================
     // Trailer actor lookup and traffic-obstacle anchor update
     //========================================================================
 
-    // the native detach resolves the detached trailer's actor from embedded
-    // pointer slots at game_actor+0x1D38 (0x28 stride per chain index). A
-    // slot's actor points back at its trailer at +0x18 — verify that instead
-    // of trusting the index, and probe each pointer before dereferencing it
+    // trailer -> trailer-actor cache: populated whenever the slot scan
+    // succeeds so the actor can still be reached after the trailer detaches
+    // and falls out of game_actor's slots
+    std::pair< void*, void* > trailer_actors[ max_trailers ] = {};
+
+    // the native detach resolves the detached trailer's actor from the slot
+    // array at game_actor+0x1D38 (0x28-stride entries, entry+0 = actor ptr).
+    // The actor's backpointer to its trailer sits at an offset this build
+    // doesn't document, so instead of guessing it the actor's own fields are
+    // scanned for a pointer back to the trailer — self-discovering
+    // the parked trailer's traffic-obstacle anchor is a component of the
+    // trailer itself, not of the game_actor slot array — so the provider's
+    // vtable is sampled from the head trailer's actor (the only slot the
+    // native code ever fills) and then matched against the trailer's own
+    // fields at detach time
+    void* provider_vtbl = nullptr;
+
     void* find_trailer_actor( void* trailer, void* game_actor )
     {
         if ( trailer == nullptr || game_actor == nullptr ) return nullptr;
-        for ( uint32_t s = 0x1D10; s <= 0x1EA0; s += 0x28 )
+        for ( uint32_t s = 0; s < 16; ++s )
         {
-            void* actor = *reinterpret_cast< void** >( reinterpret_cast< uint8_t* >( game_actor ) + s );
-            if ( plausible_object( actor ) && readable_ptr( reinterpret_cast< uint8_t* >( actor ) + 0x20 ) &&
-                prism::offsets::field< void* >( actor, 0x18 ) == trailer )
+            void* entry = reinterpret_cast< uint8_t* >( game_actor ) + 0x1D38 + s * 0x28;
+            if ( !readable_ptr( reinterpret_cast< uint8_t* >( entry ) + 8 ) ) break;
+            void* actor = *reinterpret_cast< void** >( entry );
+            if ( !plausible_object( actor ) ) continue;
+            for ( uint32_t bo = 8; bo < 0x400; bo += 8 )
+            {
+                if ( prism::offsets::field< void* >( actor, bo ) == trailer )
+                {
+                    return actor;
+                }
+            }
+        }
+        // no backpointer anywhere: the trailer's position in the chain maps
+        // to the same slot index — take it if the slot holds a real actor
+        for ( uint32_t i = 0; i < trailer_count; ++i )
+        {
+            if ( trailers[ i ] != trailer ) continue;
+            void* entry = reinterpret_cast< uint8_t* >( game_actor ) + 0x1D38 + i * 0x28;
+            void* actor = *reinterpret_cast< void** >( entry );
+            if ( plausible_object( actor ) )
             {
                 return actor;
             }
+            break;
         }
-        // fallback: the trailer's own +0x18 may point straight at its actor —
-        // symmetric with the actor+0x18 -> trailer backpointer the scan checks
-        void* cand = readable_ptr( reinterpret_cast< uint8_t* >( trailer ) + 0x20 )
-            ? prism::offsets::field< void* >( trailer, 0x18 ) : nullptr;
-        if ( plausible_object( cand ) && readable_ptr( reinterpret_cast< uint8_t* >( cand ) + 0x20 ) &&
-            prism::offsets::field< void* >( cand, 0x18 ) == trailer )
+        // cache fallback: once a trailer leaves the convoy its actor drops out
+        // of the game_actor slots entirely, so a detached trailer is only
+        // findable through the pointer we cached while it was still coupled
+        for ( uint32_t i = 0; i < max_trailers; ++i )
         {
-            return cand;
+            if ( trailer_actors[ i ].first == trailer )
+            {
+                void* cached = trailer_actors[ i ].second;
+                return plausible_object( cached ) ? cached : nullptr;
+            }
+        }
+        // last resort with a sampled vtable: find the actor-shaped object —
+        // anything whose +0x1F0 field holds a provider of the right type —
+        // inside the trailer itself and across the game_actor. Mid-chain
+        // trailers keep their actor off the head-only slot array
+        if ( provider_vtbl != nullptr )
+        {
+            auto actor_at = [ & ]( void* obj ) -> void*
+            {
+                if ( obj == nullptr || !plausible_object( obj ) ||
+                    !readable_ptr( reinterpret_cast< uint8_t* >( obj ) + 0x1F0 ) )
+                {
+                    return nullptr;
+                }
+                void* prov = prism::offsets::field< void* >( obj, 0x1F0 );
+                return prov != nullptr && plausible_object( prov ) &&
+                    *reinterpret_cast< void** >( prov ) == provider_vtbl ? obj : nullptr;
+            };
+            for ( uintptr_t off = 0x100; off < 0x2000; off += 8 )
+            {
+                if ( !readable_ptr( reinterpret_cast< uint8_t* >( trailer ) + off ) ) continue;
+                if ( void* a = actor_at( prism::offsets::field< void* >( trailer, off ) ) )
+                {
+                    CCore::g_instance->info( "anchor: actor inside trailer at +0x{:x}", off );
+                    return a;
+                }
+            }
+            for ( uintptr_t off = 0x1C00; off < 0x3000; off += 8 )
+            {
+                if ( !readable_ptr( reinterpret_cast< uint8_t* >( game_actor ) + off ) ) continue;
+                void* a = actor_at( prism::offsets::field< void* >( game_actor, off ) );
+                if ( a == nullptr ) continue;
+                // discriminate by chain position: field +0x1D38 slot offset
+                // order follows the trailer chain in the native code
+                CCore::g_instance->info( "anchor: actor-like in game_actor at +0x{:x}", off );
+                return a;
+            }
         }
         return nullptr;
+    }
+
+    void sample_provider_vtbl( void* game_actor )
+    {
+        if ( provider_vtbl != nullptr || game_actor == nullptr ) return;
+        void* actor = prism::offsets::field< void* >( game_actor, 0x1D38 );
+        if ( !plausible_object( actor ) ||
+            !readable_ptr( reinterpret_cast< uint8_t* >( actor ) + 0x1F0 ) )
+        {
+            return;
+        }
+        void* provider = prism::offsets::field< void* >( actor, 0x1F0 );
+        if ( provider != nullptr && plausible_object( provider ) &&
+            plausible_vfunc( provider, 0x28 / 8 ) && plausible_vfunc( provider, 0x30 / 8 ) )
+        {
+            provider_vtbl = *reinterpret_cast< void** >( provider );
+            CCore::g_instance->info( "anchor: sampled provider vtbl {:p}", provider_vtbl );
+        }
+    }
+
+    // scans the trailer's own fields (and the parked-state object's) for a
+    // component whose vtable matches the sampled provider — the parked
+    // trailer carries its traffic-obstacle anchor inside itself
+    void* find_trailer_provider( void* trailer )
+    {
+        if ( trailer == nullptr || provider_vtbl == nullptr ) return nullptr;
+        auto scan = [ & ]( void* obj, uintptr_t end ) -> void*
+        {
+            if ( obj == nullptr ) return nullptr;
+            for ( uintptr_t off = 0; off < end; off += 8 )
+            {
+                if ( !readable_ptr( reinterpret_cast< uint8_t* >( obj ) + off ) ) continue;
+                void* cand = *reinterpret_cast< void** >( reinterpret_cast< uint8_t* >( obj ) + off );
+                if ( cand != nullptr && plausible_object( cand ) &&
+                    *reinterpret_cast< void** >( cand ) == provider_vtbl )
+                {
+                    CCore::g_instance->info( "anchor: provider inside trailer at +0x{:x}", off );
+                    return cand;
+                }
+            }
+            return nullptr;
+        };
+        if ( void* p = scan( trailer, 0x1400 ) ) return p;
+        return scan( prism::offsets::field< void* >( trailer, prism::offsets::trailer_parked_state ), 0x800 );
+    }
+
+    void cache_trailer_actor( void* trailer, void* game_actor )
+    {
+        if ( trailer == nullptr ) return;
+        sample_provider_vtbl( game_actor );
+        void* actor = find_trailer_actor( trailer, game_actor );
+        for ( uint32_t i = 0; i < max_trailers; ++i )
+        {
+            if ( trailer_actors[ i ].first == trailer || trailer_actors[ i ].first == nullptr )
+            {
+                trailer_actors[ i ] = { trailer, actor };
+                return;
+            }
+        }
     }
 
     // native attach/detach anchor update: provider -> vfunc+0x28 yields the
@@ -483,20 +614,16 @@ namespace ts_extra_utilities
 
         // the native detach pushes the parked trailer's position into its
         // traffic-obstacle anchor BEFORE the joint drops: actor slot at
-        // game_actor+0x1D38 -> provider +0x1F0 -> anchor update at the truck's
-        // transform. Skipping it leaves the lane modifier owner stale and the
-        // traffic sweep hits it whenever the trailer sits on a road
-        if ( register_anchor_fn != nullptr )
-        {
-            void* game_actor = CCore::g_instance->get_game_actor();
-            void* actor = find_trailer_actor( trailer, game_actor );
-            void* provider = actor != nullptr && readable_ptr( reinterpret_cast< uint8_t* >( actor ) + 0x1F8 )
-                ? prism::offsets::field< void* >( actor, 0x1F0 ) : nullptr;
-            CCore::g_instance->info( "anchor: trailer {:p} actor {:p} provider {:p}", trailer, actor, provider );
-            alignas( 16 ) uint8_t xf[ 0x20 ]{};
-            truck_xform( game_actor, xf );
-            push_anchor_update( provider, xf );
-        }
+        // game_actor+0x1D38 -> provider +0x1F0 -> anchor update. Skipping it
+        // leaves the lane modifier owner stale and the traffic sweep hits it
+        // whenever the trailer sits on a road. Unlike the head trailer — which
+        // parks right under the truck — a mid-chain detach can sit anywhere,
+        // so the trailer's own transform is the one that goes to the anchor
+        // the actor->provider->anchor path is head-trailer-only in the native
+        // code; the parked vfunc +0x328 below already registers the detached
+        // trailer as a traffic obstacle, and pushing a mid-chain trailer's
+        // transform through the head trailer's anchor corrupts it (AV in this
+        // plugin). Intentionally left out.
         vcall< prism::physics_trailer_u_disconnect_fn >( trailer, prism::offsets::vfunc_disconnect );
 
         // tell every component on both vehicles the coupling is gone — the
@@ -518,6 +645,14 @@ namespace ts_extra_utilities
         if ( prism::offsets::field< void* >( trailer, prism::offsets::trailer_parked_state ) != nullptr )
         {
             prism::offsets::field< uint8_t >( trailer, prism::offsets::trailer_parked ) = 1;
+        }
+        // native detach calls trailer vfunc +0x328(trailer, true) — the real
+        // "set parked" that registers the detached trailer as a traffic
+        // obstacle with a live owner. Setting the flag alone leaves the
+        // obstacle unregistered and the traffic sweep hits a dead entry
+        if ( plausible_vfunc( trailer, 0x328 / 8 ) )
+        {
+            vcall< prism::physics_trailer_u_set_trailer_brace_fn >( trailer, 0x328 / 8, true );
         }
         // the game applies spring brakes the same way on a jointless trailer
         prism::offsets::field< float >( trailer, prism::offsets::trailer_brake ) = 1.f;
@@ -691,11 +826,20 @@ namespace ts_extra_utilities
             clear_detached_flag_fn( parent, 0, 0 );
             clear_detached_flag_fn( trailer, 0, 0 );
         }
-        // un-park fully: drop the parked-state backpointer and the flag byte —
-        // the record would otherwise keep the trailer's own update re-asserting
-        // the lock and snapping it back to the stored parked pose
-        prism::offsets::field< void* >( trailer, prism::offsets::trailer_parked_state ) = nullptr;
-        prism::offsets::field< uint8_t >( trailer, prism::offsets::trailer_parked ) = 0;
+        // un-park: native attach only clears the flag byte (when a parked-state
+        // record exists) and never nulls the backpointer — the traffic obstacle
+        // registration may still reference it, and orphaning it leaves a dead
+        // entry the traffic sweep crashes on even after the trailer re-couples
+        if ( prism::offsets::field< void* >( trailer, prism::offsets::trailer_parked_state ) != nullptr )
+        {
+            prism::offsets::field< uint8_t >( trailer, prism::offsets::trailer_parked ) = 0;
+        }
+        // native attach calls trailer vfunc +0x328(trailer, false) — un-registers
+        // the parked traffic obstacle so the trailer rejoins the convoy clean
+        if ( plausible_vfunc( trailer, 0x328 / 8 ) )
+        {
+            vcall< prism::physics_trailer_u_set_trailer_brace_fn >( trailer, 0x328 / 8, false );
+        }
         // a jointless trailer sits on spring brakes (trailer_brake = 1.0), applied by
         // the game's own update; now that the joint exists, release it or the trailer
         // keeps dragging along with locked wheels
@@ -753,17 +897,9 @@ namespace ts_extra_utilities
         // replicating it kept resolving wrong-typed objects whose vfuncs jumped
         // into space, so it stays out: the truck-side anchor gets refreshed by
         // the game's own per-tick updates anyway
-        void* game_actor = CCore::g_instance->get_game_actor();
-        alignas( 16 ) uint8_t xf[ 0x20 ]{};
-        truck_xform( game_actor, xf );
-
-        void* actor = find_trailer_actor( trailer, game_actor );
-        if ( actor != nullptr && readable_ptr( reinterpret_cast< uint8_t* >( actor ) + 0x200 ) )
-        {
-            void* provider = prism::offsets::field< void* >( actor, 0x1F8 );
-            CCore::g_instance->info( "attach anchor: trailer {:p} actor {:p} provider {:p}", trailer, actor, provider );
-            push_anchor_update( provider, xf );
-        }
+        // no anchor push here either: the only actor slot is the head
+        // trailer's, and +0x328 already un-registers the parked obstacle —
+        // writing through a foreign anchor corrupts it
     }
 
     //========================================================================
@@ -1262,6 +1398,17 @@ namespace ts_extra_utilities
             for ( uint32_t i = 0; i < trailer_count; ++i ) listed |= trailers[ i ] == truck_towed;
             if ( !listed && trailer_count < max_trailers ) trailers[ trailer_count++ ] = truck_towed;
         }
+
+        // cache each trailer's actor while it is still registered: the slots
+        // only hold convoy members, so the pointer must be captured before a
+        // detach or the parked trailer's traffic anchor can never be updated
+        if ( auto* game_actor = CCore::g_instance->get_game_actor() )
+        {
+            for ( uint32_t i = 0; i < trailer_count; ++i )
+            {
+                cache_trailer_actor( trailers[ i ], game_actor );
+            }
+        }
     }
 
     // trailer hose/cable visuals + the detach/restore traffic suppression.
@@ -1551,24 +1698,10 @@ namespace ts_extra_utilities
         // the game from auto-re-attaching the freed link to its old parent
         CCore::g_instance->info( "Disconnecting trailer {}", i );
 
-        // active AI traffic is what makes the detach crash: the parked trailer
-        // becomes a lane obstacle and the traffic sweep dies on it. Zero the
-        // traffic first and give the despawn ~30 sim ticks to clear the lanes
-        // before the joint actually drops. The live value is saved once —
-        // further detaches while part of the set is already out must not
-        // overwrite it with the zero we wrote ourselves
-        if ( saved_traffic < 0.f && get_cvar_float_fn != nullptr && g_traffic_cvar != nullptr )
-        {
-            saved_traffic = get_cvar_float_fn( g_traffic_cvar );
-            expected_trailers = trailer_count;
-            CCore::g_instance->info( "g_traffic before detach = {:.2f} (set size {})", saved_traffic, expected_trailers );
-        }
-        queue_cmd( "g_traffic 0" );
-        // skip the despawn wait only when traffic is known to be already zero;
-        // an unreadable cvar keeps the delay (safer than a stale lane crash).
-        // Clearing the done flag here keeps the restore from firing during the
-        // delay — the joint is still alive and the set still reads as coupled
-        if ( queue_op( pending_kind::disconnect, trailer, parent, i == 0 || on_truck, saved_traffic == 0.f ? 0 : 30 ) )
+        // traffic stays live: the parked vfunc (+0x328) registers the detached
+        // trailer as a proper lane obstacle, so the sweep handles it like any
+        // parked trailer — no suppression or despawn wait needed
+        if ( queue_op( pending_kind::disconnect, trailer, parent, i == 0 || on_truck, 0 ) )
         {
             traffic_detach_done.store( false, std::memory_order_release );
         }
@@ -1595,7 +1728,7 @@ namespace ts_extra_utilities
             return;
         }
         // proximity rule like the native T: hooks must nearly touch — no
-        // teleporting the trailer onto the hook (< 2 m hook-to-hook)
+        // teleporting the trailer onto the hook (< 7 m measured hook-to-hook)
         if ( hook_far( trailers[ i ], parent, i == 0 ) )
         {
             CCore::g_instance->warning( "Trailer {} is too far — reverse closer to attach", i + 1 );

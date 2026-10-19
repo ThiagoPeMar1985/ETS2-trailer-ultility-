@@ -64,6 +64,31 @@ Copy `ts-extra-utilities.dll` to `<game_install_location>/bin/win_x64/plugins`
 In game: press `Delete` to open the window, `Insert` to enable the mouse cursor. Open **Keybinds**
 to bind the steering actions to the keys you want.
 
+### Rebinding the window/cursor keys
+
+All bindings live in `%APPDATA%\ts-extra-utilities\settings.ini` — including the window and
+cursor keys, which cannot be rebound in-game (they are the only way to reach the UI, so a bad
+in-game bind would lock the plugin). Edit the file while the game is closed.
+
+Distributors: the included `ts-settings.ini` can also be placed next to the dll in the plugins
+folder — on a fresh install it seeds the bindings below until the user saves their own
+keybinds in-game. The `ts-` prefix keeps it from colliding with other plugins' ini files.
+
+```ini
+[keybinds]
+toggle_ui=DELETE
+toggle_cursor=INSERT
+```
+
+The shipped preset file is `ts-settings.ini` — it sits next to `ts-extra-utilities.dll` in the
+plugins folder.
+
+Values accept either a virtual-key code (`46`) or a key name: `A`-`Z`, `0`-`9`, `F1`-`F24`,
+`INSERT`, `DELETE`, `HOME`, `END`, `PAGEUP`, `PAGEDOWN`, `UP`, `DOWN`, `LEFT`, `RIGHT`,
+`SPACE`, `TAB`, `ENTER`, `BACKSPACE`, `NUMPAD0`-`NUMPAD9`, `MINUS`, `EQUALS`, `COMMA`,
+`PERIOD`. An empty, invalid, or duplicated value falls back to `Delete`/`Insert` so the
+window always stays reachable.
+
 # ☕ Buy me a coffee
 
 If this plugin helped you, you can support the work with a small donation — even $1 makes a difference and keeps the updates coming:
