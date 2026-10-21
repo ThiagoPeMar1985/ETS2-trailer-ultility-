@@ -68,6 +68,51 @@ namespace ts_extra_utilities
                 CCore::g_instance->info( "Present hook is live, overlay initialized" );
             }
         }
+        else
+        {
+            // the game can recreate its device/swapchain on resolution change,
+            // alt+tab out of exclusive fullscreen, etc. — drawing with the stale
+            // device shows up as the overlay flickering, so re-init on change
+            ID3D11Device* current_device = nullptr;
+            if ( SUCCEEDED( swap_chain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&current_device)) )
+                && current_device != nullptr && current_device != device )
+            {
+                ImGui_ImplDX11_Shutdown();
+                ImGui_ImplWin32_Shutdown();
+
+                ID3D11Device* old_device = device;
+                ID3D11DeviceContext* old_context = device_context;
+                device = current_device;
+                device->GetImmediateContext( &device_context );
+                if ( old_context != nullptr ) old_context->Release();
+                if ( old_device != nullptr ) old_device->Release();
+
+                DXGI_SWAP_CHAIN_DESC desc;
+                swap_chain->GetDesc( &desc );
+                HWND new_hwnd = desc.OutputWindow;
+
+                ImGui_ImplWin32_Init( new_hwnd );
+                ImGui_ImplDX11_Init( device, device_context );
+                ImGui_ImplDX11_CreateDeviceObjects();
+
+                // re-hook the window proc only if the window is new or our hook
+                // was lost — storing WndProcD3D itself as "original" would recurse
+                if ( new_hwnd != prism_hwnd
+                    || GetWindowLongPtr( new_hwnd, GWLP_WNDPROC ) != reinterpret_cast< LONG_PTR >( WndProcD3D ) )
+                {
+                    WNDPROC prev = reinterpret_cast< WNDPROC >(
+                        SetWindowLongPtr( new_hwnd, GWLP_WNDPROC, reinterpret_cast< LONG_PTR >( WndProcD3D ) )
+                    );
+                    if ( prev != WndProcD3D ) original_wndproc = prev;
+                }
+                prism_hwnd = new_hwnd;
+                CCore::g_instance->info( "Game device changed, overlay re-initialized" );
+            }
+            else if ( current_device != nullptr )
+            {
+                current_device->Release();
+            }
+        }
 
         // not a D3D11 swapchain otherwise, nothing to draw with
         if ( imgui_initialized )
