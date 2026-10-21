@@ -15,9 +15,14 @@
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler( HWND, UINT, WPARAM, LPARAM );
 
+namespace ts_extra_utilities { void ts_shutdown_mark( const char* step ); }
+
 namespace ts_extra_utilities
 {
     CCore* CCore::g_instance = nullptr;
+
+    std::atomic< bool > g_shutting_down{ false };
+    std::atomic< int > g_detour_depth{ 0 };
 
     CCore::CCore( const scs_telemetry_init_params_v101_t* init_params ) : init_params_( init_params )
     {
@@ -31,6 +36,7 @@ namespace ts_extra_utilities
     {
         this->destroy();
         MH_RemoveHook( nullptr );
+        g_instance = nullptr;
     }
 
     bool CCore::init()
@@ -66,9 +72,13 @@ namespace ts_extra_utilities
 
     void CCore::destroy()
     {
+        ts_shutdown_mark( "destroy: dx11_hook" );
         delete this->dx11_hook;
+        ts_shutdown_mark( "destroy: di8_hook" );
         delete this->di8_hook;
+        ts_shutdown_mark( "destroy: hooks_manager" );
         delete this->hooks_manager_;
+        ts_shutdown_mark( "destroy: window_manager" );
         delete this->window_manager_;
     }
 

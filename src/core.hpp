@@ -1,4 +1,5 @@
 ﻿#pragma once
+#include <atomic>
 #include <dinput.h>
 #include <memory>
 
@@ -13,6 +14,21 @@ namespace ts_extra_utilities
 {
     class CWindowManager;
     class CTrailerManipulation;
+
+    // Set by scs_telemetry_shutdown before CCore is destroyed. Detours check it
+    // and pass straight through to the original code so nothing touches game
+    // objects or freed plugin state while the process is tearing down.
+    extern std::atomic< bool > g_shutting_down;
+
+    // Number of threads currently inside one of our detours. Shutdown waits for
+    // this to drain so destroy() never frees objects a detour is still using.
+    extern std::atomic< int > g_detour_depth;
+
+    struct detour_call_guard_t
+    {
+        detour_call_guard_t() { g_detour_depth.fetch_add( 1, std::memory_order_acq_rel ); }
+        ~detour_call_guard_t() { g_detour_depth.fetch_sub( 1, std::memory_order_acq_rel ); }
+    };
 
     namespace prism
     {

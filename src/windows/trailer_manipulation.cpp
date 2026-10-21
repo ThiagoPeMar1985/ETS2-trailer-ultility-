@@ -19,6 +19,56 @@ namespace ts_extra_utilities
 {
     constexpr uint32_t max_trailers = 20;
 
+    //====================================================================
+    // Per-game image offsets (image base 0x140000000)
+    //
+    // The pattern scans used in init() resolve identically in both 1.61
+    // binaries, but the fixed addresses below are build-specific. The ATS
+    // column was mapped instruction-by-instruction from the ETS2 build:
+    // same codegen, shifted addresses (verified: attach/detach dispatch
+    // bodies match at identical instruction offsets).
+    //====================================================================
+    struct game_image_offsets_t
+    {
+        uint64_t get_cvar_float;            // cvar float reader
+        uint64_t g_traffic_cvar;            // the g_traffic cvar object
+        uint64_t traffic_manager_global;    // world/vehicle manager singleton
+        uint64_t register_anchor;           // parked-obstacle transform push
+        uint64_t relink_anchors;            // type-2 anchor re-link
+        uint64_t anchor_reg_guard;          // native anchor write counter
+        uint64_t traffic_game_state;        // == 2 while in game
+        uint64_t trailer_settle;            // settle trailer on hook (attach)
+        uint64_t pair_vehicles;             // connector pairing (air/electric)
+        uint64_t apply_cables;              // trailer-cables cvar apply
+        uint64_t actor_flag_fixup;          // actor +0x248 flags refresh
+        uint64_t native_attach;             // native attach dispatcher
+        uint64_t detach_dispatch;           // native detach dispatcher (hooked)
+        uint64_t get_cvar_int;              // cvar int reader
+        uint64_t cables_mode_cvar;          // g_trailer_cables_mode cvar
+        uint64_t attach_settle_cvar;        // settle cvar read at attach time
+        uint64_t truck_brake_broadcast_ret; // return addr inside truck brake broadcast
+        uint64_t truck_forced_broadcast_ret;// return addr inside truck forced broadcast
+        float    max_hook_gap;              // refuse connects beyond this gap (m)
+    };
+
+    constexpr game_image_offsets_t img_ets2 = {
+        0x1401DB560, 0x142D45500, 0x1436AF7C8,
+        0x140284250, 0x140623C90, 0x143051824, 0x143051820,
+        0x1409FB700, 0x1408771A0, 0x1408762E0, 0x1405DCBC0,
+        0x1405DCC20, 0x1405DD410, 0x1401CBE10, 0x142D485C0, 0x142D48200,
+        0x14064B7EF, 0x14064B806,
+        7.f // bitrem chains measure ~6-7 m at touching distance
+    };
+    constexpr game_image_offsets_t img_ats = {
+        0x1401DC850, 0x142D50AB0, 0x1436BAD90,
+        0x140285540, 0x140625090, 0x14305CDE4, 0x14305CDE0,
+        0x1409FCB00, 0x1408785A0, 0x1408776E0, 0x1405DDFC0,
+        0x1405DE020, 0x1405DE810, 0x1401CD100, 0x142D53B70, 0x142D537B0,
+        0x14064CBEF, 0x14064CC06,
+        12.f // american doubles/skip trailers need ~12 m at coupling range
+    };
+    const game_image_offsets_t* img = nullptr;
+
     //========================================================================
     // Memory safety probes
     //
@@ -392,9 +442,9 @@ namespace ts_extra_utilities
         const float gap = hook_gap( trailer, parent, parent_is_truck );
         if ( gap < 0.f ) return false; // cannot measure: keep the old fail-open
         CCore::g_instance->info( "Hook gap trailer {:p} to {:p}: {:.2f}m", trailer, parent, gap );
-        // bitrem chains measure ~6-7 m at touching distance — keep one limit
-        // that works for every configuration instead of one per layout
-        return gap > 7.f;
+        // per-game limit: bitrem chains measure ~6-7 m at touching distance,
+        // american doubles need ~12 m — still far below any real teleport
+        return gap > ( img != nullptr ? img->max_hook_gap : 7.f );
     }
 
     //========================================================================
@@ -911,9 +961,15 @@ namespace ts_extra_utilities
     // Also pumps the sim-thread queues (ops and console lines).
     void hk_crashes_when_disconnected( prism::physics_trailer_u* self, prism::game_trailer_actor_u* trailer )
     {
+        const detour_call_guard_t detour_guard;
+        if ( g_shutting_down.load( std::memory_order_acquire ) )
+        {
+            pending = {};
+            pending_cmd_queued.store( false, std::memory_order_release );
+        }
         // console commands run first: a queued "g_traffic 0" must land before a
         // delayed disconnect drops the joint
-        if ( pending_cmd_queued.load( std::memory_order_acquire ) && execute_line_fn != nullptr )
+        else if ( pending_cmd_queued.load( std::memory_order_acquire ) && execute_line_fn != nullptr )
         {
             pending_cmd_queued.store( false, std::memory_order_release );
             char* text = pending_cmd;
@@ -952,7 +1008,8 @@ namespace ts_extra_utilities
     // keep working
     void hk_connect_slave( prism::physics_trailer_u* self )
     {
-        void* slave = self != nullptr
+        const detour_call_guard_t detour_guard;
+        void* slave = !g_shutting_down.load( std::memory_order_acquire ) && self != nullptr
             ? prism::offsets::field< void* >( self, prism::offsets::trailer_slave )
             : nullptr;
         if ( slave != nullptr && is_detached( slave ) )
@@ -968,6 +1025,7 @@ namespace ts_extra_utilities
     // detached trailer left sitting at quit
     void __fastcall hk_pre_detach( void* self, void* trailer )
     {
+        const detour_call_guard_t detour_guard;
         if ( trailer == nullptr ||
             prism::offsets::field< void* >( trailer, prism::offsets::trailer_physics_joint ) == nullptr )
         {
@@ -984,8 +1042,9 @@ namespace ts_extra_utilities
     using native_detach_dispatch_fn = void __fastcall( void* /*game_actor*/, uint8_t /*dl*/, uint64_t /*r8*/ );
     void __fastcall hk_detach_dispatch( void* self, uint8_t dl, uint64_t r8 )
     {
+        const detour_call_guard_t detour_guard;
         detach_dispatch_hook->get_original< native_detach_dispatch_fn >()( self, dl, r8 );
-        if ( self == nullptr ) return;
+        if ( g_shutting_down.load( std::memory_order_acquire ) || self == nullptr ) return;
         void* t = prism::offsets::field< void* >( self, prism::offsets::game_actor_trailer );
         if ( t != nullptr && joint( t ) == nullptr )
         {
@@ -1056,6 +1115,12 @@ namespace ts_extra_utilities
 
     void __fastcall hk_brake_chain_setter( void* self, float v )
     {
+        const detour_call_guard_t detour_guard;
+        if ( g_shutting_down.load( std::memory_order_acquire ) )
+        {
+            brake_chain_setter_hook->get_original< brake_setter_fn >()( self, v );
+            return;
+        }
         if ( v > 0.f && foreign_brake_write( self, _ReturnAddress() ) )
         {
             if ( void* s = next_jointless_link( self ) )
@@ -1069,12 +1134,24 @@ namespace ts_extra_utilities
 
     void __fastcall hk_brake_setter( void* self, float v )
     {
+        const detour_call_guard_t detour_guard;
+        if ( g_shutting_down.load( std::memory_order_acquire ) )
+        {
+            brake_setter_hook->get_original< brake_setter_fn >()( self, v );
+            return;
+        }
         if ( v > 0.f && foreign_brake_write( self, _ReturnAddress() ) ) return;
         brake_setter_hook->get_original< brake_setter_fn >()( self, v );
     }
 
     void __fastcall hk_forced_chain_setter( void* self, uint8_t v )
     {
+        const detour_call_guard_t detour_guard;
+        if ( g_shutting_down.load( std::memory_order_acquire ) )
+        {
+            forced_chain_setter_hook->get_original< forced_setter_fn >()( self, v );
+            return;
+        }
         if ( v != 0 && foreign_brake_write( self, _ReturnAddress() ) )
         {
             if ( void* s = next_jointless_link( self ) )
@@ -1088,6 +1165,12 @@ namespace ts_extra_utilities
 
     void __fastcall hk_forced_setter( void* self, uint8_t v )
     {
+        const detour_call_guard_t detour_guard;
+        if ( g_shutting_down.load( std::memory_order_acquire ) )
+        {
+            forced_setter_hook->get_original< forced_setter_fn >()( self, v );
+            return;
+        }
         if ( v != 0 && foreign_brake_write( self, _ReturnAddress() ) ) return;
         forced_setter_hook->get_original< forced_setter_fn >()( self, v );
     }
@@ -1102,6 +1185,12 @@ namespace ts_extra_utilities
     //------------------------------------------------------------------------
     void hk_set_individual_steering( prism::vehicle_wheel_steering_data_t* data, float angle )
     {
+        const detour_call_guard_t detour_guard;
+        if ( g_shutting_down.load( std::memory_order_acquire ) )
+        {
+            set_individual_steering_hook->get_original< prism::set_individual_steering_fn >()( data, angle );
+            return;
+        }
         for ( auto& locked : locked_steering )
         {
             if ( data != nullptr && locked.data.load( std::memory_order_relaxed ) == data )
@@ -1189,30 +1278,30 @@ namespace ts_extra_utilities
         // the world/vehicle manager singleton + the parked-obstacle anchor
         // registration + the in-game state flag, all read out of the native
         // detach body (fixed image offsets for this build)
-        get_cvar_float_fn = reinterpret_cast< prism::cvar_get_float_fn* >( memory::get_address_from_offset( 0x1401DB560 ) );
-        g_traffic_cvar = reinterpret_cast< void* >( memory::get_address_from_offset( 0x142D45500 ) );
-        traffic_manager_global = reinterpret_cast< void** >( memory::get_address_from_offset( 0x1436AF7C8 ) );
-        register_anchor_fn = reinterpret_cast< prism::traffic_register_anchor_fn* >( memory::get_address_from_offset( 0x140284250 ) );
-        relink_anchors_fn = reinterpret_cast< anchor_relink_fn* >( memory::get_address_from_offset( 0x140623C90 ) );
-        anchor_reg_guard = reinterpret_cast< uint32_t* >( memory::get_address_from_offset( 0x143AF1824 ) );
-        traffic_game_state = reinterpret_cast< uint32_t* >( memory::get_address_from_offset( 0x143AF1820 ) );
+        get_cvar_float_fn = reinterpret_cast< prism::cvar_get_float_fn* >( memory::get_address_from_offset( img->get_cvar_float ) );
+        g_traffic_cvar = reinterpret_cast< void* >( memory::get_address_from_offset( img->g_traffic_cvar ) );
+        traffic_manager_global = reinterpret_cast< void** >( memory::get_address_from_offset( img->traffic_manager_global ) );
+        register_anchor_fn = reinterpret_cast< prism::traffic_register_anchor_fn* >( memory::get_address_from_offset( img->register_anchor ) );
+        relink_anchors_fn = reinterpret_cast< anchor_relink_fn* >( memory::get_address_from_offset( img->relink_anchors ) );
+        anchor_reg_guard = reinterpret_cast< uint32_t* >( memory::get_address_from_offset( img->anchor_reg_guard ) );
+        traffic_game_state = reinterpret_cast< uint32_t* >( memory::get_address_from_offset( img->traffic_game_state ) );
 
         // the remaining native attach/detach calls (see declarations above)
-        trailer_settle_fn_ptr = reinterpret_cast< trailer_settle_fn* >( memory::get_address_from_offset( 0x1409FB700 ) );
-        pair_vehicles_fn = reinterpret_cast< vehicle_pair_fn* >( memory::get_address_from_offset( 0x1408771A0 ) );
-        apply_cables_fn = reinterpret_cast< vehicle_cables_fn* >( memory::get_address_from_offset( 0x1408762E0 ) );
-        actor_flag_fixup_fn = reinterpret_cast< actor_flag_fixup* >( memory::get_address_from_offset( 0x1405DCBC0 ) );
-        native_attach_fn = reinterpret_cast< native_attach_dispatch_fn* >( memory::get_address_from_offset( 0x1405DCC20 ) );
+        trailer_settle_fn_ptr = reinterpret_cast< trailer_settle_fn* >( memory::get_address_from_offset( img->trailer_settle ) );
+        pair_vehicles_fn = reinterpret_cast< vehicle_pair_fn* >( memory::get_address_from_offset( img->pair_vehicles ) );
+        apply_cables_fn = reinterpret_cast< vehicle_cables_fn* >( memory::get_address_from_offset( img->apply_cables ) );
+        actor_flag_fixup_fn = reinterpret_cast< actor_flag_fixup* >( memory::get_address_from_offset( img->actor_flag_fixup ) );
+        native_attach_fn = reinterpret_cast< native_attach_dispatch_fn* >( memory::get_address_from_offset( img->native_attach ) );
         detach_dispatch_hook = CCore::g_instance->get_hooks_manager()->register_function_hook(
-            "native_detach_dispatch", memory::get_address_from_offset( 0x1405DD410 ),
+            "native_detach_dispatch", memory::get_address_from_offset( img->detach_dispatch ),
             reinterpret_cast< uint64_t >( &hk_detach_dispatch ) );
         if ( detach_dispatch_hook != nullptr )
         {
             detach_dispatch_hook->hook();
         }
-        get_cvar_int_fn = reinterpret_cast< cvar_get_int_fn* >( memory::get_address_from_offset( 0x1401CBE10 ) );
-        cables_mode_cvar = reinterpret_cast< void* >( memory::get_address_from_offset( 0x142D485C0 ) );
-        attach_settle_cvar = reinterpret_cast< void* >( memory::get_address_from_offset( 0x142D48200 ) );
+        get_cvar_int_fn = reinterpret_cast< cvar_get_int_fn* >( memory::get_address_from_offset( img->get_cvar_int ) );
+        cables_mode_cvar = reinterpret_cast< void* >( memory::get_address_from_offset( img->cables_mode_cvar ) );
+        attach_settle_cvar = reinterpret_cast< void* >( memory::get_address_from_offset( img->attach_settle_cvar ) );
 
         if ( exec_line_address != 0 )
         {
@@ -1239,8 +1328,8 @@ namespace ts_extra_utilities
     // chain cannot re-brake it through the shared trailer_slave link
     void register_brake_hooks()
     {
-        truck_brake_broadcast_ret = memory::get_address_from_offset( 0x14064B7EF );
-        truck_forced_broadcast_ret = memory::get_address_from_offset( 0x14064B806 );
+        truck_brake_broadcast_ret = memory::get_address_from_offset( img->truck_brake_broadcast_ret );
+        truck_forced_broadcast_ret = memory::get_address_from_offset( img->truck_forced_broadcast_ret );
         const auto brake_chain_setter_address = memory::get_address_for_pattern(
             "f3 0f 11 89 60 07 00 00 48 8b 89 88 10 00 00" );
         const auto brake_setter_address = memory::get_address_for_pattern(
@@ -1281,6 +1370,29 @@ namespace ts_extra_utilities
 
     bool CTrailerManipulation::init()
     {
+        // the fixed addresses below are build-specific — pick the table for
+        // the executable we're running under, or refuse on unknown binaries
+        // (hooking a wrong address corrupts whatever function lives there)
+        wchar_t exe_path[ MAX_PATH ] = {};
+        GetModuleFileNameW( nullptr, exe_path, MAX_PATH );
+        const wchar_t* exe_name = wcsrchr( exe_path, L'\\' );
+        exe_name = exe_name != nullptr ? exe_name + 1 : exe_path;
+        if ( _wcsicmp( exe_name, L"eurotrucks2.exe" ) == 0 )
+        {
+            img = &img_ets2;
+        }
+        else if ( _wcsicmp( exe_name, L"amtrucks.exe" ) == 0 )
+        {
+            img = &img_ats;
+        }
+        else
+        {
+            char exe_narrow[ MAX_PATH ] = {};
+            WideCharToMultiByte( CP_UTF8, 0, exe_name, -1, exe_narrow, MAX_PATH, nullptr, nullptr );
+            CCore::g_instance->warning( "Trailer manipulation is not supported on {} — no offset table for this binary", exe_narrow );
+            return false;
+        }
+
         const auto address = memory::get_address_for_pattern( "48 89 5c 24 08 48 89 74 24 10 57 48 83 ec ? 8b 41 ? 48 8b d9 0f 29 74" );
 
         if ( address == 0 )
@@ -1671,6 +1783,9 @@ namespace ts_extra_utilities
 
     void CTrailerManipulation::update( const float dt )
     {
+        // shutdown: the game frees actors before unloading plugins — stop
+        // reading the trailer chain or we dereference dead objects
+        if ( g_shutting_down.load( std::memory_order_acquire ) ) return;
         if ( !this->valid_ ) return;
         refresh_trailer_chain();
         update_convoy_state();

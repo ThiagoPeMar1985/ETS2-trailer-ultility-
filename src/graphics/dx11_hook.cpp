@@ -27,9 +27,22 @@ namespace ts_extra_utilities
     HWND prism_hwnd;
     WNDPROC original_wndproc;
 
+    extern void ts_shutdown_mark( const char* step );
+
     LRESULT __stdcall WndProcD3D( HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam )
     {
-        if ( CCore::g_instance->on_wnd_proc( hwnd, umsg, wparam, lparam ) ) return 0;
+        const detour_call_guard_t detour_guard;
+        // teardown observability: window destruction is the first close signal
+        // the plugin sees — scs_telemetry_shutdown may never run after this
+        if ( umsg == WM_DESTROY || umsg == WM_CLOSE )
+        {
+            ts_shutdown_mark( umsg == WM_DESTROY ? "WM_DESTROY on game window" : "WM_CLOSE on game window" );
+        }
+        if ( !g_shutting_down.load( std::memory_order_acquire ) && CCore::g_instance != nullptr
+            && CCore::g_instance->on_wnd_proc( hwnd, umsg, wparam, lparam ) )
+        {
+            return 0;
+        }
         return CallWindowProc( original_wndproc, hwnd, umsg, wparam, lparam );
     }
 
@@ -115,7 +128,9 @@ namespace ts_extra_utilities
         }
 
         // not a D3D11 swapchain otherwise, nothing to draw with
-        if ( imgui_initialized )
+        // shutdown: stop rendering the overlay — render() reads game state
+        // (trailer chain) that is being freed underneath us
+        if ( imgui_initialized && !g_shutting_down.load( std::memory_order_acquire ) && CCore::g_instance != nullptr )
         {
             CCore::g_instance->render();
         }
@@ -123,6 +138,7 @@ namespace ts_extra_utilities
 
     HRESULT hk_present( IDXGISwapChain* swap_chain, const UINT sync_interval, const UINT flags )
     {
+        const detour_call_guard_t detour_guard;
         on_present( swap_chain );
         const auto hr = present_hook->get_original< present_fn >()( swap_chain, sync_interval, flags );
         --present_depth;
@@ -131,6 +147,7 @@ namespace ts_extra_utilities
 
     HRESULT hk_present1( IDXGISwapChain1* swap_chain, const UINT sync_interval, const UINT flags, const DXGI_PRESENT_PARAMETERS* params )
     {
+        const detour_call_guard_t detour_guard;
         on_present( swap_chain );
         const auto hr = present1_hook->get_original< present1_fn >()( swap_chain, sync_interval, flags, params );
         --present_depth;
